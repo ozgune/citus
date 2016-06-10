@@ -382,12 +382,6 @@ ErrorIfQueryNotSupported(Query *queryTree)
 		errorDetail = "Window functions are currently unsupported";
 	}
 
-	if (queryTree->limitOffset)
-	{
-		preconditionsSatisfied = false;
-		errorDetail = "Limit Offset clause is currently unsupported";
-	}
-
 	if (queryTree->setOperations)
 	{
 		preconditionsSatisfied = false;

@@ -347,3 +347,92 @@ SELECT count(*) FROM lineitem JOIN orders ON l_orderkey = o_orderkey
 SELECT count(*) FROM lineitem, orders WHERE l_orderkey + 1 = o_orderkey;
 ERROR:  cannot perform local joins that involve expressions
 DETAIL:  local joins can be performed between columns only
+-- Check that we can issue limit/offset queries
+-- Simple LIMIT/OFFSET with ORDER BY
+SELECT o_orderkey FROM orders ORDER BY o_orderkey LIMIT 10 OFFSET 20;
+ o_orderkey 
+------------
+         69
+         70
+         71
+         96
+         97
+         98
+         99
+        100
+        101
+        102
+(10 rows)
+
+-- LIMIT/OFFSET with a subquery
+SET citus.task_executor_type TO 'task-tracker';
+SELECT 
+	customer_keys.o_custkey,
+	SUM(order_count) AS total_order_count 
+FROM 
+	(SELECT o_custkey, o_orderstatus, COUNT(*) AS order_count 
+	 FROM orders GROUP BY o_custkey, o_orderstatus ) customer_keys
+GROUP BY 
+	customer_keys.o_custkey
+ORDER BY 
+	customer_keys.o_custkey DESC
+LIMIT 10 OFFSET 20;
+ o_custkey | total_order_count 
+-----------+-------------------
+      1466 |                 1
+      1465 |                 2
+      1463 |                 4
+      1462 |                10
+      1460 |                 1
+      1459 |                 6
+      1457 |                 1
+      1456 |                 3
+      1454 |                 2
+      1453 |                 5
+(10 rows)
+
+SET citus.task_executor_type TO 'real-time';
+-- Ensure that we push down LIMIT and OFFSET properly
+SET client_min_messages TO 'debug1';
+CREATE TEMP TABLE temp_limit_test_1 AS
+SELECT o_custkey FROM orders LIMIT 10 OFFSET 15;
+DEBUG:  push down of limit count: 25
+CREATE TEMP TABLE temp_limit_test_2 AS
+SELECT o_custkey FROM orders GROUP BY o_custkey LIMIT 10 OFFSET 15;
+DEBUG:  push down of limit count: 25
+CREATE TEMP TABLE temp_limit_test_3 AS
+SELECT o_custkey FROM orders GROUP BY o_custkey ORDER BY o_custkey LIMIT 10 OFFSET 15;
+DEBUG:  push down of limit count: 25
+-- Order by aggregate -> No push-down
+CREATE TEMP TABLE temp_limit_test_4 AS
+SELECT o_custkey, COUNT(*) AS ccnt FROM orders GROUP BY o_custkey ORDER BY ccnt DESC LIMIT 10 OFFSET 15;
+-- Has aggregate but no order-by -> No push-down
+CREATE TEMP TABLE temp_limit_test_5 AS
+SELECT o_custkey, COUNT(*) AS ccnt FROM orders GROUP BY o_custkey LIMIT 10 OFFSET 15;
+RESET client_min_messages;
+-- LIMIT/OFFSET with Joins
+SELECT 
+	li.l_partkey,
+	o.o_custkey,
+	li.l_quantity
+FROM 
+	lineitem li JOIN orders o ON li.l_orderkey = o.o_orderkey
+WHERE 
+	li.l_quantity > 25
+ORDER BY
+	li.l_quantity
+LIMIT 10 OFFSET 20;
+ l_partkey | o_custkey | l_quantity 
+-----------+-----------+------------
+    135912 |       509 |      26.00
+     75351 |      1261 |      26.00
+    199475 |      1052 |      26.00
+     91309 |         8 |      26.00
+     53624 |       400 |      26.00
+    182736 |      1048 |      26.00
+     59694 |       163 |      26.00
+     20481 |       173 |      26.00
+     78748 |      1499 |      26.00
+      7614 |      1397 |      26.00
+(10 rows)
+
