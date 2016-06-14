@@ -17,6 +17,7 @@
 #include "distributed/multi_physical_planner.h"
 #include "distributed/task_tracker.h"
 #include "distributed/worker_manager.h"
+#include "nodes/params.h"
 
 
 #define MAX_TASK_EXECUTION_FAILURES 3 /* allowed failure count for one task */
@@ -187,7 +188,7 @@ extern bool BinaryMasterCopyFormat;
 
 
 /* Function declarations for distributed execution */
-extern void MultiRealTimeExecute(Job *job);
+extern void MultiRealTimeExecute(Job *job, ParamListInfo executorParams);
 extern void MultiTaskTrackerExecute(Job *job);
 
 /* Function declarations common to more than one executor */

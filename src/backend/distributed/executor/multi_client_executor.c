@@ -327,6 +327,42 @@ MultiClientSendQuery(int32 connectionId, const char *query)
 }
 
 
+/* MultiClientSendQuery sends the given query over the given connection. */
+bool
+MultiClientSendQueryParams(int32 connectionId, const char *query, ParamListInfo executorParams)
+{
+	PGconn *connection = NULL;
+	bool success = true;
+	int querySent = 0;
+	ParamExternData paramData = executorParams->params[0];
+
+	Assert(connectionId != INVALID_CONNECTION_ID);
+	connection = ClientConnectionArray[connectionId];
+	Assert(connection != NULL);
+
+	/*
+	 * XXX Need to convert executorParams->params (ParamExternData array) into
+	 * 			  const Oid *paramTypes,
+	 *			  const char *const * paramValues,
+	 *			  const int *paramLengths,
+	 *			  const int *paramFormats
+	 * to use in PQsendQueryParams().
+	 * querySent = PQsendQueryParams(connection, query, ...);
+	 */
+	querySent = PQsendQuery(connection, query);
+	if (querySent == 0)
+	{
+		char *errorMessage = PQerrorMessage(connection);
+		ereport(WARNING, (errmsg("could not send remote query \"%s\"", query),
+						  errdetail("Client error: %s", errorMessage)));
+
+		success = false;
+	}
+
+	return success;
+}
+
+
 /* MultiClientCancel cancels the running query on the given connection. */
 bool
 MultiClientCancel(int32 connectionId)

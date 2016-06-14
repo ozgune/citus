@@ -100,7 +100,7 @@ multi_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			}
 			else if (executorType == MULTI_EXECUTOR_REAL_TIME)
 			{
-				MultiRealTimeExecute(workerJob);
+				MultiRealTimeExecute(workerJob, queryDesc->params);
 			}
 			else if (executorType == MULTI_EXECUTOR_TASK_TRACKER)
 			{

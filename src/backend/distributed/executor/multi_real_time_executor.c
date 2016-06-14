@@ -34,7 +34,7 @@
 
 /* Local functions forward declarations */
 static ConnectAction ManageTaskExecution(Task *task, TaskExecution *taskExecution,
-										 TaskExecutionStatus *executionStatus);
+										 TaskExecutionStatus *executionStatus, ParamListInfo executorParams);
 static bool TaskExecutionReadyToStart(TaskExecution *taskExecution);
 static bool TaskExecutionCompleted(TaskExecution *taskExecution);
 static void CancelTaskExecutionIfActive(TaskExecution *taskExecution);
@@ -65,7 +65,7 @@ static void UpdateConnectionCounter(WorkerNodeState *workerNode,
  * manages these tasks' execution in real-time.
  */
 void
-MultiRealTimeExecute(Job *job)
+MultiRealTimeExecute(Job *job, ParamListInfo executorParams)
 {
 	List *taskList = job->taskList;
 	List *taskExecutionList = NIL;
@@ -124,7 +124,7 @@ MultiRealTimeExecute(Job *job)
 			}
 
 			/* call the function that performs the core task execution logic */
-			connectAction = ManageTaskExecution(task, taskExecution, &executionStatus);
+			connectAction = ManageTaskExecution(task, taskExecution, &executionStatus, executorParams);
 
 			/* update the connection counter for throttling */
 			UpdateConnectionCounter(workerNodeState, connectAction);
@@ -246,7 +246,7 @@ MultiRealTimeExecute(Job *job)
  */
 static ConnectAction
 ManageTaskExecution(Task *task, TaskExecution *taskExecution,
-					TaskExecutionStatus *executionStatus)
+					TaskExecutionStatus *executionStatus, ParamListInfo executorParams)
 {
 	TaskExecStatus *taskStatusArray = taskExecution->taskStatusArray;
 	int32 *connectionIdArray = taskExecution->connectionIdArray;

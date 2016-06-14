@@ -11,6 +11,9 @@
  *-------------------------------------------------------------------------
  */
 
+#include "nodes/params.h"
+
+
 #ifndef MULTI_CLIENT_EXECUTOR_H
 #define MULTI_CLIENT_EXECUTOR_H
 
@@ -105,6 +108,7 @@ extern ConnectStatus MultiClientConnectPoll(int32 connectionId);
 extern void MultiClientDisconnect(int32 connectionId);
 extern bool MultiClientConnectionUp(int32 connectionId);
 extern bool MultiClientSendQuery(int32 connectionId, const char *query);
+extern bool MultiClientSendQueryParams(int32 connectionId, const char *query, ParamListInfo executorParams);
 extern bool MultiClientCancel(int32 connectionId);
 extern ResultStatus MultiClientResultStatus(int32 connectionId);
 extern QueryStatus MultiClientQueryStatus(int32 connectionId);
