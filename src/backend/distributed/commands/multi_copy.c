@@ -82,6 +82,7 @@
 #include "distributed/multi_transaction.h"
 #include "distributed/pg_dist_partition.h"
 #include "distributed/resource_lock.h"
+#include "distributed/shard_transaction.h"
 #include "distributed/shardinterval_utils.h"
 #include "distributed/worker_protocol.h"
 #include "executor/execdesc.h"
