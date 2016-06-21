@@ -18,7 +18,7 @@ extern PlannedStmt * multi_planner(Query *parse, int cursorOptions,
 
 extern bool HasCitusToplevelNode(PlannedStmt *planStatement);
 struct MultiPlan;
-extern struct MultiPlan * CreatePhysicalPlan(Query *parse);
+extern struct MultiPlan * CreatePhysicalPlan(Query *originalQuery, Query *query, ParamListInfo boundParams);
 extern struct MultiPlan * GetMultiPlan(PlannedStmt *planStatement);
 extern PlannedStmt * MultiQueryContainerNode(PlannedStmt *result,
 											 struct MultiPlan *multiPlan);

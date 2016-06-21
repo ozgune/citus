@@ -22,6 +22,7 @@
 #endif
 #include "access/xact.h"
 #include "distributed/citus_nodes.h"
+#include "distributed/citus_nodefuncs.h"
 #include "distributed/master_metadata_utility.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_join_order.h"
@@ -68,7 +69,7 @@ static ShardInterval * FastShardPruning(Oid distributedTableId,
 										Const *partionColumnValue);
 static Oid ExtractFirstDistributedTableId(Query *query);
 static Const * ExtractInsertPartitionValue(Query *query, Var *partitionColumn);
-static Task * RouterSelectTask(Query *query);
+static Task * RouterSelectTask(Query *originalQuery, Query *query);
 static Job * RouterQueryJob(Query *query, Task *task);
 static bool MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType);
 static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
@@ -83,7 +84,7 @@ static void SetRangeTablesInherited(Query *query);
  * returns NULL.
  */
 MultiPlan *
-MultiRouterPlanCreate(Query *query, MultiExecutorType taskExecutorType)
+MultiRouterPlanCreate(Query *originalQuery, Query *query, MultiExecutorType taskExecutorType)
 {
 	Task *task = NULL;
 	Job *job = NULL;
@@ -114,11 +115,11 @@ MultiRouterPlanCreate(Query *query, MultiExecutorType taskExecutorType)
 	{
 		Assert(commandType == CMD_SELECT);
 
-		task = RouterSelectTask(query);
+		task = RouterSelectTask(originalQuery, query);
 	}
 
 
-	job = RouterQueryJob(query, task);
+	job = RouterQueryJob(originalQuery, task);
 
 	multiPlan = CitusMakeNode(MultiPlan);
 	multiPlan->workerJob = job;
@@ -768,7 +769,7 @@ ExtractInsertPartitionValue(Query *query, Var *partitionColumn)
 
 /* RouterSelectTask builds a Task to represent a single shard select query */
 static Task *
-RouterSelectTask(Query *query)
+RouterSelectTask(Query *originalQuery, Query *query)
 {
 	Task *task = NULL;
 	ShardInterval *shardInterval = TargetShardInterval(query);
@@ -777,6 +778,12 @@ RouterSelectTask(Query *query)
 	bool upsertQuery = false;
 	CmdType commandType PG_USED_FOR_ASSERTS_ONLY = query->commandType;
 	FromExpr *joinTree = NULL;
+	List *rangeTableList = NIL;
+	RangeTblEntry *rangeTableEntry = NULL;
+	Oid relationId = InvalidOid;
+	char *relationName = NULL;
+	Oid schemaId = InvalidOid;
+	char *schemaName = NULL;
 
 	Assert(shardInterval != NULL);
 	Assert(commandType == CMD_SELECT);
@@ -794,13 +801,24 @@ RouterSelectTask(Query *query)
 		joinTree->quals = whereClause;
 	}
 
-	/*
-	 * We set inh flag of all range tables entries to true so that deparser will not
-	 * add ONLY keyword to resulting query string.
-	 */
-	SetRangeTablesInherited(query);
+	ExtractRangeTableRelationWalker((Node *) query, &rangeTableList);
+	Assert(list_length(rangeTableList) == 1);
 
-	deparse_shard_query(query, shardInterval->relationId, shardId, queryString);
+	rangeTableEntry = (RangeTblEntry *) linitial(rangeTableList);
+	relationId = rangeTableEntry->relid;
+	relationName = get_rel_name(relationId);
+	AppendShardIdToName(&relationName, shardId);
+
+	schemaId = get_rel_namespace(relationId);
+	schemaName = get_namespace_name(schemaId);
+	if (strncmp(schemaName, "public", NAMEDATALEN) == 0)
+	{
+		schemaName = NULL;
+	}
+
+	ModifyRangeTblExtraData(rangeTableEntry, CITUS_RTE_SHARD, schemaName,
+							relationName, NIL);
+	pg_get_query_def(query, queryString);
 	ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
 
 	task = CitusMakeNode(Task);
