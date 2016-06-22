@@ -102,4 +102,17 @@ UPDATE example SET value = array[timestamptz '10-20-2013 10:20']::date[] WHERE k
 -- this one is not
 UPDATE example SET value = array[time_col]::date[] WHERE key = 1;
 
+-- test that UPDATE and DELETE also have the functions in WHERE evaluated
+
+ALTER TABLE example DROP time_col;
+ALTER TABLE example DROP value;
+ALTER TABLE example ADD value timestamptz;
+
+INSERT INTO example VALUES (3, now());
+UPDATE example SET value = timestamp '10-10-2000 00:00' WHERE key = 3 AND value > now() - interval '1 hour';
+SELECT * FROM example WHERE key = 3;
+
+DELETE FROM example WHERE key = 3 AND value < now() - interval '1 hour';
+SELECT * FROM example WHERE key = 3;
+
 DROP TABLE example;
