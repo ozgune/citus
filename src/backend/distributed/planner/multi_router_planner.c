@@ -532,7 +532,7 @@ ContainsDisallowedFunctionCallsWalker(Node *expression, WalkerState *state)
 	 * Once you've added them to this check, make sure you also evaluate them in the
 	 * executor!
 	 */
-	StaticAssertStmt(PG_VERSION_NUM <= 90501, "When porting to a newer PG this section"
+	StaticAssertStmt(PG_VERSION_NUM <= 90503, "When porting to a newer PG this section"
 											  " needs to be reviewed.");
 
 	if (IsA(expression, OpExpr))
