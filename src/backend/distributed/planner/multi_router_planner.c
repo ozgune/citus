@@ -91,6 +91,7 @@ MultiRouterPlanCreate(Query *originalQuery, Query *query, MultiExecutorType task
 	MultiPlan *multiPlan = NULL;
 	CmdType commandType = query->commandType;
 	bool modifyTask = false;
+	Query *jobQuery = NULL;
 
 	bool routerPlannable = MultiRouterPlannableQuery(query, taskExecutorType);
 	if (!routerPlannable)
@@ -110,16 +111,17 @@ MultiRouterPlanCreate(Query *originalQuery, Query *query, MultiExecutorType task
 	{
 		ErrorIfModifyQueryNotSupported(query);
 		task = RouterModifyTask(query);
+		jobQuery = query;
 	}
 	else
 	{
 		Assert(commandType == CMD_SELECT);
 
 		task = RouterSelectTask(originalQuery, query);
+		jobQuery = originalQuery;
 	}
 
-
-	job = RouterQueryJob(originalQuery, task);
+	job = RouterQueryJob(jobQuery, task);
 
 	multiPlan = CitusMakeNode(MultiPlan);
 	multiPlan->workerJob = job;
