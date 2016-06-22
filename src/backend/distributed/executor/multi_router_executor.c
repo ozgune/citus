@@ -46,7 +46,6 @@ bool AllModificationsCommutative = false;
 static LOCKMODE CommutativityRuleToLockMode(CmdType commandType, bool upsertQuery);
 static void AcquireExecutorShardLock(Task *task, LOCKMODE lockMode);
 static int32 ExecuteDistributedModify(Query *query, Task *task);
-static void ExecuteFunctions(Query *query);
 static void DeparseShardQuery(Query *query, Task *task, StringInfo queryString);
 static void ExecuteSingleShardSelect(QueryDesc *queryDesc, uint64 tupleCount,
 									 Task *task, EState *executorState,
@@ -352,51 +351,6 @@ ExecuteDistributedModify(Query *query, Task *task)
 	}
 
 	return affectedTupleCount;
-}
-
-
-/*
- * Walks each TargetEntry of the query, evaluates sub-expressions without Vars.
- */
-static void
-ExecuteFunctions(Query *query)
-{
-	CmdType commandType = query->commandType;
-	ListCell *targetEntryCell = NULL;
-	Node *modifiedNode = NULL;
-
-	if (query->jointree && query->jointree->quals)
-	{
-		query->jointree->quals = PartiallyEvaluateExpression(query->jointree->quals);
-	}
-
-	foreach(targetEntryCell, query->targetList)
-	{
-		TargetEntry *targetEntry = (TargetEntry *) lfirst(targetEntryCell);
-
-		/* performance optimization for the most common cases */
-		if (IsA(targetEntry->expr, Const) || IsA(targetEntry->expr, Var))
-		{
-			continue;
-		}
-
-		if (commandType == CMD_INSERT)
-		{
-			modifiedNode = EvaluateExpression((Node *) targetEntry->expr);
-		}
-		else
-		{
-			modifiedNode = PartiallyEvaluateExpression((Node *) targetEntry->expr);
-		}
-
-		targetEntry->expr = (Expr *) modifiedNode;
-	}
-
-	if(query->jointree)
-	{
-		Assert(!contain_mutable_functions((Node *) (query->jointree->quals)));
-	}
-	Assert(!contain_mutable_functions((Node *) (query->targetList)));
 }
 
 

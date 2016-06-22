@@ -137,11 +137,6 @@ SELECT master_modify_multiple_shards('UPDATE multi_shard_modify_test SET t_value
 SELECT t_value FROM multi_shard_modify_test WHERE t_key=10;
 
 CREATE FUNCTION temp_stable_func() RETURNS integer AS 'SELECT 10;' LANGUAGE SQL STABLE;
-\c - - - :worker_1_port
-CREATE FUNCTION temp_stable_func() RETURNS integer AS 'SELECT 10;' LANGUAGE SQL STABLE;
-\c - - - :worker_2_port
-CREATE FUNCTION temp_stable_func() RETURNS integer AS 'SELECT 10;' LANGUAGE SQL STABLE;
-\c - - - :master_port
 
 -- updates referencing non-IMMUTABLE functions are unsupported
 SELECT master_modify_multiple_shards('UPDATE multi_shard_modify_test SET t_name = ''FAIL!'' WHERE t_key = temp_stable_func()');

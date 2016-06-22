@@ -16,6 +16,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/nodes.h"
 #include "nodes/primnodes.h"
+#include "optimizer/clauses.h"
 #include "optimizer/planmain.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -23,6 +24,51 @@
 static Node * PartiallyEvaluateExpressionWalker(Node *expression, bool *containsVar);
 static Expr * citus_evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod,
 								  Oid result_collation);
+
+
+/*
+ * Walks each TargetEntry of the query, evaluates sub-expressions without Vars.
+ */
+void
+ExecuteFunctions(Query *query)
+{
+	CmdType commandType = query->commandType;
+	ListCell *targetEntryCell = NULL;
+	Node *modifiedNode = NULL;
+
+	if (query->jointree && query->jointree->quals)
+	{
+		query->jointree->quals = PartiallyEvaluateExpression(query->jointree->quals);
+	}
+
+	foreach(targetEntryCell, query->targetList)
+	{
+		TargetEntry *targetEntry = (TargetEntry *) lfirst(targetEntryCell);
+
+		/* performance optimization for the most common cases */
+		if (IsA(targetEntry->expr, Const) || IsA(targetEntry->expr, Var))
+		{
+			continue;
+		}
+
+		if (commandType == CMD_INSERT)
+		{
+			modifiedNode = EvaluateExpression((Node *) targetEntry->expr);
+		}
+		else
+		{
+			modifiedNode = PartiallyEvaluateExpression((Node *) targetEntry->expr);
+		}
+
+		targetEntry->expr = (Expr *) modifiedNode;
+	}
+
+	if(query->jointree)
+	{
+		Assert(!contain_mutable_functions((Node *) (query->jointree->quals)));
+	}
+	Assert(!contain_mutable_functions((Node *) (query->targetList)));
+}
 
 
 /*

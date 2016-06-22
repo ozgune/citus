@@ -24,6 +24,7 @@
 #include "catalog/pg_class.h"
 #include "commands/dbcommands.h"
 #include "commands/event_trigger.h"
+#include "distributed/citus_clauses.h"
 #include "distributed/citus_ruleutils.h"
 #include "distributed/connection_cache.h"
 #include "distributed/listutils.h"
@@ -115,6 +116,8 @@ master_modify_multiple_shards(PG_FUNCTION_ARGS)
 	modifyQuery = (Query *) linitial(queryTreeList);
 
 	ErrorIfModifyQueryNotSupported(modifyQuery);
+
+	ExecuteFunctions(modifyQuery);
 
 	shardIntervalList = LoadShardIntervalList(relationId);
 	restrictClauseList = WhereClauseList(modifyQuery->jointree);
