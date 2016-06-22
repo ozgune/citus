@@ -146,8 +146,6 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 	ListCell *rangeTableCell = NULL;
 	bool hasValuesScan = false;
 	uint32 queryTableCount = 0;
-	bool hasNonConstTargetEntryExprs = false;
-	bool hasNonConstQualExprs = false;
 	bool specifiesPartitionValue = false;
 #if (PG_VERSION_NUM >= 90500)
 	ListCell *setTargetCell = NULL;
@@ -289,8 +287,9 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 			if (commandType == CMD_UPDATE &&
 				contain_volatile_functions((Node *) targetEntry->expr))
 			{
-				hasNonConstTargetEntryExprs = true;
-				break;
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("functions used in UPDATE queries on distributed "
+										 "tables must not be VOLATILE")));
 			}
 
 			if (commandType == CMD_UPDATE &&
@@ -320,7 +319,9 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 		{
 			if (contain_volatile_functions(joinTree->quals))
 			{
-				hasNonConstQualExprs = true;
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("functions used in the WHERE clause of modification "
+										 "queries on distributed tables must not be VOLATILE")));
 			}
 			else if (ContainsDisallowedFunctionCalls(joinTree->quals, &hasVarArgument,
 													 &hasBadCoalesce))
@@ -391,7 +392,9 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 			}
 			else if (contain_mutable_functions((Node *) setTargetEntry->expr))
 			{
-				hasNonConstTargetEntryExprs = true;
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("functions used in the DO UPDATE SET clause of INSERTs "
+										 "on distributed tables must be marked IMMUTABLE")));
 			}
 		}
 	}
@@ -400,16 +403,12 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 	if (contain_mutable_functions((Node *) arbiterWhere) ||
 		contain_mutable_functions((Node *) onConflictWhere))
 	{
-		hasNonConstQualExprs = true;
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("functions used in the WHERE clause of the ON CONFLICT "
+							   "clause of INSERTs on distributed tables must be marked "
+								 "IMMUTABLE")));
 	}
 #endif
-
-	if (hasNonConstTargetEntryExprs || hasNonConstQualExprs)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("functions used in modification queries on distributed "
-							   "tables must be marked IMMUTABLE")));
-	}
 
 	if (specifiesPartitionValue)
 	{
