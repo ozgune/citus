@@ -378,6 +378,23 @@ TupleToShardPlacement(TupleDesc tupleDescriptor, HeapTuple heapTuple)
 
 
 /*
+ * CopyShardPlacement copies fields from the specified source ShardPlacement
+ * into the fields of the provided destination ShardPlacement.
+ */
+void
+CopyShardPlacement(ShardPlacement *srcPlacement, ShardPlacement *destPlacement)
+{
+	destPlacement->type = srcPlacement->type;
+	destPlacement->tupleOid = srcPlacement->tupleOid;
+	destPlacement->shardId = srcPlacement->shardId;
+	destPlacement->shardLength = srcPlacement->shardLength;
+	destPlacement->shardState = srcPlacement->shardState;
+	destPlacement->nodeName = pstrdup(srcPlacement->nodeName);
+	destPlacement->nodePort = srcPlacement->nodePort;
+}
+
+
+/*
  * InsertShardRow opens the shard system catalog, and inserts a new row with the
  * given values into that system catalog. Note that we allow the user to pass in
  * null min/max values in case they are creating an empty shard.

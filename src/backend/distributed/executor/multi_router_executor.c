@@ -24,6 +24,7 @@
 #include "distributed/multi_executor.h"
 #include "distributed/multi_physical_planner.h"
 #include "distributed/multi_router_executor.h"
+#include "distributed/relay_utility.h"
 #include "distributed/resource_lock.h"
 #include "executor/executor.h"
 #include "nodes/pg_list.h"
@@ -39,10 +40,16 @@
 /* controls use of locks to enforce safe commutativity */
 bool AllModificationsCommutative = false;
 
+static uint64 shardForTransaction = INVALID_SHARD_ID;
+static bool callbackInstalled = false;
+static bool txnStarted = false;
+static List *participantList = NIL;
+static List *failedParticipantList = NIL;
 
 static LOCKMODE CommutativityRuleToLockMode(CmdType commandType, bool upsertQuery);
 static void AcquireExecutorShardLock(Task *task, LOCKMODE lockMode);
 static uint64 ExecuteDistributedModify(Task *task);
+static void ExecuteTransactionEnd(char *sqlCommand);
 static void ExecuteSingleShardSelect(QueryDesc *queryDesc, uint64 tupleCount,
 									 Task *task, EState *executorState,
 									 TupleDesc tupleDescriptor,
@@ -50,6 +57,9 @@ static void ExecuteSingleShardSelect(QueryDesc *queryDesc, uint64 tupleCount,
 static bool SendQueryInSingleRowMode(PGconn *connection, char *query);
 static bool StoreQueryResult(PGconn *connection, TupleDesc tupleDescriptor,
 							 Tuplestorestate *tupleStore);
+static void RouterTransactionCallback(XactEvent event, void *arg);
+static void RouterSubtransactionCallback(SubXactEvent event, SubTransactionId subId,
+										 SubTransactionId parentSubid, void *arg);
 
 
 /*
@@ -66,12 +76,57 @@ RouterExecutorStart(QueryDesc *queryDesc, int eflags, Task *task)
 	/* ensure that the task is not NULL */
 	Assert(task != NULL);
 
-	/* disallow transactions and triggers during distributed modify commands */
+	/* disallow triggers during distributed modify commands */
 	if (commandType != CMD_SELECT)
 	{
-		bool topLevel = true;
-		PreventTransactionChain(topLevel, "distributed commands");
 		eflags |= EXEC_FLAG_SKIP_TRIGGERS;
+
+		if (IsTransactionBlock())
+		{
+			if (shardForTransaction == INVALID_SHARD_ID)
+			{
+				MemoryContext oldContext = NULL;
+				ListCell *placementCell = NULL;
+
+				oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+				foreach(placementCell, task->taskPlacementList)
+				{
+					ShardPlacement *placement = (ShardPlacement *) lfirst(placementCell);
+					PGconn *connection = GetOrEstablishConnection(placement->nodeName,
+																  placement->nodePort);
+					TxnParticipant *txnParticipant = NULL;
+					txnParticipant = (TxnParticipant *) palloc(sizeof(TxnParticipant));
+
+					CopyShardPlacement(placement, (ShardPlacement *) txnParticipant);
+					txnParticipant->connection = connection;
+
+					if (txnParticipant->connection != NULL)
+					{
+						participantList = lappend(participantList, txnParticipant);
+					}
+					else
+					{
+						failedParticipantList = lappend(participantList, txnParticipant);
+					}
+				}
+
+				MemoryContextSwitchTo(oldContext);
+
+				shardForTransaction = task->anchorShardId;
+
+				if (!callbackInstalled)
+				{
+					RegisterXactCallback(RouterTransactionCallback, NULL);
+					RegisterSubXactCallback(RouterSubtransactionCallback, NULL);
+					callbackInstalled = true;
+				}
+			}
+			else if (shardForTransaction != task->anchorShardId)
+			{
+				ereport(ERROR, (errmsg("CAN'T CHANGE SHARDS	")));
+			}
+		}
 	}
 
 	/* signal that it is a router execution */
@@ -241,11 +296,31 @@ static uint64
 ExecuteDistributedModify(Task *task)
 {
 	int64 affectedTupleCount = -1;
+	List *placementList = task->taskPlacementList;
+	int totalPlacements = list_length(placementList);
+	int totalFailures = list_length(failedParticipantList);
 	ListCell *taskPlacementCell = NULL;
 	List *failedPlacementList = NIL;
 	ListCell *failedPlacementCell = NULL;
 
-	foreach(taskPlacementCell, task->taskPlacementList)
+	/* if taking part in a transaction, use static transaction list */
+	if (shardForTransaction != INVALID_SHARD_ID)
+	{
+		placementList = participantList;
+
+		/* and add a BEGIN statement to the first command */
+		if (!txnStarted)
+		{
+			StringInfo modifiedQueryString = makeStringInfo();
+			appendStringInfoString(modifiedQueryString, "BEGIN; ");
+			appendStringInfoString(modifiedQueryString, task->queryString);
+
+			task->queryString = modifiedQueryString->data;
+			txnStarted = true;
+		}
+	}
+
+	foreach(taskPlacementCell, placementList)
 	{
 		ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
 		char *nodeName = taskPlacement->nodeName;
@@ -282,6 +357,9 @@ ExecuteDistributedModify(Task *task)
 
 			if (raiseError)
 			{
+				/* this placement is already aborted; remove it from participant list */
+				participantList = list_delete_ptr(participantList, taskPlacement);
+
 				ReraiseRemoteError(connection, result);
 			}
 			else
@@ -322,8 +400,36 @@ ExecuteDistributedModify(Task *task)
 		PQclear(result);
 	}
 
-	/* if all placements failed, error out */
-	if (list_length(failedPlacementList) == list_length(task->taskPlacementList))
+	/* total failures should count previously failed placements */
+	totalFailures += list_length(failedPlacementList);
+
+	if (shardForTransaction != INVALID_SHARD_ID)
+	{
+		ListCell *placementCell;
+		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+		/*
+		 * Placements themselves are already in TopTransactionContext, so they
+		 * will live on to the next command; just need to ensure the txn's list
+		 * of placements is built in the same context.
+		 */
+		foreach(placementCell, failedPlacementList)
+		{
+			ShardPlacement *failedPlacement = lfirst(placementCell);
+			failedParticipantList = lappend(failedParticipantList, failedPlacement);
+
+			/* additionally, remove newly failed placements from txn's list */
+			participantList = list_delete_ptr(participantList, failedPlacement);
+		}
+
+		MemoryContextSwitchTo(oldContext);
+
+		/* invalidation occurs later for txns: clear local failure list */
+		failedPlacementList = NIL;
+	}
+
+	/* if all placements have failed, error out */
+	if (totalFailures == totalPlacements)
 	{
 		ereport(ERROR, (errmsg("could not modify any active placements")));
 	}
@@ -341,6 +447,36 @@ ExecuteDistributedModify(Task *task)
 	}
 
 	return (uint64) affectedTupleCount;
+}
+
+
+/*
+ * ExecuteTransactionEnd ends any remote transactions still taking place on
+ * remote nodes. It uses txnPlacementList to know which placements still need
+ * final COMMIT or ABORT commands. Any failures are added to the other list,
+ * failedTxnPlacementList, to eventually be marked as failed.
+ */
+static void
+ExecuteTransactionEnd(char *sqlCommand)
+{
+	ListCell *participantCell = NULL;
+
+	foreach(participantCell, participantList)
+	{
+		TxnParticipant *participant = (TxnParticipant *) lfirst(participantCell);
+		PGconn *connection = participant->connection;
+		PGresult *result = NULL;
+
+		result = PQexec(connection, sqlCommand);
+		if (PQresultStatus(result) != PGRES_COMMAND_OK)
+		{
+			WarnRemoteError(connection, result);
+
+			failedParticipantList = lappend(failedParticipantList, participant);
+		}
+
+		PQclear(result);
+	}
 }
 
 
@@ -619,4 +755,110 @@ RouterExecutorEnd(QueryDesc *queryDesc)
 	FreeExecutorState(estate);
 	queryDesc->estate = NULL;
 	queryDesc->totaltime = NULL;
+}
+
+
+/*
+ * RouterTransactionCallback handles committing or aborting remote transactions
+ * after the local one has committed or aborted. It only sends COMMIT or ABORT
+ * commands to still-healthy remotes; the failed ones are marked as inactive if
+ * after a successful COMMIT (no need to mark on ABORTs).
+ */
+static void
+RouterTransactionCallback(XactEvent event, void *arg)
+{
+	if (!txnStarted)
+	{
+		return;
+	}
+
+	switch (event)
+	{
+		/* after the local transaction commits, commit the remote ones */
+		case XACT_EVENT_COMMIT:
+#if (PG_VERSION_NUM >= 90500)
+		case XACT_EVENT_PARALLEL_COMMIT:
+#endif
+		{
+			ListCell *failedPlacementCell = NULL;
+
+			ExecuteTransactionEnd("COMMIT TRANSACTION");
+
+			/* now mark all failed placements inactive */
+			foreach(failedPlacementCell, failedParticipantList)
+			{
+				ShardPlacement *failedPlacement = NULL;
+				failedPlacement = (ShardPlacement *) lfirst(failedPlacementCell);
+				uint64 shardLength = 0;
+
+				DeleteShardPlacementRow(failedPlacement->shardId,
+										failedPlacement->nodeName,
+										failedPlacement->nodePort);
+				InsertShardPlacementRow(failedPlacement->shardId,
+										FILE_INACTIVE, shardLength,
+										failedPlacement->nodeName,
+										failedPlacement->nodePort);
+			}
+
+			break;
+		}
+
+		/* if the local transaction aborts, send ABORT to healthy remotes */
+		case XACT_EVENT_ABORT:
+#if (PG_VERSION_NUM >= 90500)
+		case XACT_EVENT_PARALLEL_ABORT:
+#endif
+		{
+			ExecuteTransactionEnd("ABORT TRANSACTION");
+
+			break;
+		}
+
+		/* no support for prepare with long-running transactions */
+		case XACT_EVENT_PREPARE:
+		case XACT_EVENT_PRE_PREPARE:
+		{
+			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							errmsg("cannot prepare a transaction that modified "
+								   "distributed tables")));
+
+			break;
+		}
+
+		/* we don't have any work to do pre-commit */
+		case XACT_EVENT_PRE_COMMIT:
+#if (PG_VERSION_NUM >= 90500)
+		case XACT_EVENT_PARALLEL_PRE_COMMIT:
+#endif
+		{
+			/* leave early to avoid resetting transaction state */
+			return;
+		}
+	}
+
+	/* reset transaction state */
+	shardForTransaction = INVALID_SHARD_ID;
+	participantList = NIL;
+	failedParticipantList = NIL;
+	txnStarted = false;
+}
+
+
+/*
+ * pgfdw_subxact_callback --- cleanup at subtransaction end.
+ */
+static void
+RouterSubtransactionCallback(SubXactEvent event, SubTransactionId subId,
+							 SubTransactionId parentSubid, void *arg)
+{
+	if (txnStarted && event == SUBXACT_EVENT_ABORT_SUB)
+	{
+		UnregisterSubXactCallback(RouterSubtransactionCallback, NULL);
+
+		AbortOutOfAnyTransaction();
+
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot ROLLBACK in transactions which modify "
+							   "distributed tables")));
+	}
 }
