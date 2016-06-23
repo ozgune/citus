@@ -14,8 +14,6 @@
 #include "nodes/nodes.h"
 #include "nodes/parsenodes.h"
 
-extern Node * PartiallyEvaluateExpression(Node *expression);
-extern Node * EvaluateExpression(Node *expression);
 extern void ExecuteFunctions(Query *query);
 
 #endif /* CITUS_NODEFUNCS_H */

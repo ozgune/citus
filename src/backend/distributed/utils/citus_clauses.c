@@ -21,6 +21,8 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 
+static Node * PartiallyEvaluateExpression(Node *expression);
+static Node * EvaluateNodeIfReferencesFunction(Node *expression);
 static Node * PartiallyEvaluateExpressionWalker(Node *expression, bool *containsVar);
 static Expr * citus_evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod,
 								  Oid result_collation);
@@ -53,7 +55,7 @@ ExecuteFunctions(Query *query)
 
 		if (commandType == CMD_INSERT)
 		{
-			modifiedNode = EvaluateExpression((Node *) targetEntry->expr);
+			modifiedNode = EvaluateNodeIfReferencesFunction((Node *) targetEntry->expr);
 		}
 		else
 		{
@@ -75,7 +77,7 @@ ExecuteFunctions(Query *query)
  * Walks the expression, evaluating any STABLE or IMMUTABLE functions so long as they
  * don't reference Vars.
  */
-Node *
+static Node *
 PartiallyEvaluateExpression(Node *expression)
 {
 	bool unused;
@@ -131,7 +133,7 @@ PartiallyEvaluateExpressionWalker(Node *expression, bool *containsVar)
 	}
 	else
 	{
-		copy = EvaluateExpression(copy);
+		copy = EvaluateNodeIfReferencesFunction(copy);
 	}
 
 	return copy;
@@ -146,8 +148,8 @@ PartiallyEvaluateExpressionWalker(Node *expression, bool *containsVar)
  * consistent shard replicas, since we use statement replication). This means evaluating
  * all nodes which invoke functions which might not be IMMUTABLE.
  */
-Node *
-EvaluateExpression(Node *expression)
+static Node *
+EvaluateNodeIfReferencesFunction(Node *expression)
 {
 	if (IsA(expression, FuncExpr))
 	{
