@@ -14,11 +14,7 @@ SELECT master_create_distributed_table('tpch.nation', 'n_nationkey', 'append');
  
 (1 row)
 
-\STAGE tpch.nation FROM '@abs_srcdir@/data/nation.data' with delimiter '|'
-NOTICE:  Citus partially supports CREATE SCHEMA for distributed databases
-DETAIL:  schema usage in joins and in some UDFs provided by Citus are not supported yet
-NOTICE:  Citus partially supports CREATE SCHEMA for distributed databases
-DETAIL:  schema usage in joins and in some UDFs provided by Citus are not supported yet
+\COPY tpch.nation FROM '@abs_srcdir@/data/nation.data' with delimiter '|'
 SELECT count(*) from tpch.nation;
  count 
 -------
