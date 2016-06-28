@@ -29,6 +29,8 @@
 
 #include "utils/memutils.h"
 
+static List *relationRestrictionContextList = NIL;
+
 /* local function forward declarations */
 static void CheckNodeIsDumpable(Node *node);
 
@@ -44,20 +46,40 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	PlannedStmt *result = NULL;
 	Query *originalQuery = copyObject(parse);
 
-	/*
-	 * First call into standard planner. This is required because the Citus
-	 * planner relies on parse tree transformations made by postgres' planner.
-	 */
-	result = standard_planner(parse, cursorOptions, boundParams);
-
-	if (NeedsDistributedPlanning(parse))
+	PG_TRY();
 	{
-		MultiPlan *physicalPlan = CreatePhysicalPlan(originalQuery, parse, boundParams);
+		RelationRestrictionContext *restrictionContext = palloc0(sizeof(RelationRestrictionContext));
+		relationRestrictionContextList = lappend(relationRestrictionContextList, restrictionContext);
 
-		/* store required data into the planned statement */
-		result = MultiQueryContainerNode(result, physicalPlan);
+		/*
+		 * First call into standard planner. This is required because the Citus
+		 * planner relies on parse tree transformations made by postgres' planner.
+		 */
+
+		result = standard_planner(parse, cursorOptions, boundParams);
+
+		if (NeedsDistributedPlanning(parse))
+		{
+			MultiPlan *physicalPlan = CreatePhysicalPlan(originalQuery, parse, boundParams, restrictionContext);
+
+			/* store required data into the planned statement */
+			result = MultiQueryContainerNode(result, physicalPlan);
+		}
+
+
+		relationRestrictionContextList = list_delete_ptr(relationRestrictionContextList,
+														 restrictionContext);
 	}
-
+	PG_CATCH();
+	{
+		RelationRestrictionContext *restrictionContext =
+				(RelationRestrictionContext *) llast(relationRestrictionContextList);
+		relationRestrictionContextList = list_delete_ptr(relationRestrictionContextList,
+				 	 	 	 	 	 	 	 	 	 	 restrictionContext);
+		ereport(WARNING, (errmsg("in catch block")));
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	return result;
 }
 
@@ -70,10 +92,10 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
  * physical plan process needed to produce distributed query plans.
  */
 MultiPlan *
-CreatePhysicalPlan(Query *originalQuery, Query *query, ParamListInfo boundParams)
+CreatePhysicalPlan(Query *originalQuery, Query *query, ParamListInfo boundParams, RelationRestrictionContext *restrictionContext)
 {
 	Query *queryCopy = copyObject(query);
-	MultiPlan *physicalPlan = MultiRouterPlanCreate(originalQuery, queryCopy, TaskExecutorType);
+	MultiPlan *physicalPlan = MultiRouterPlanCreate(originalQuery, queryCopy, TaskExecutorType, restrictionContext);
 	if (physicalPlan == NULL)
 	{
 		/* Create and optimize logical plan */
@@ -274,4 +296,48 @@ CheckNodeIsDumpable(Node *node)
 	char *out = CitusNodeToString(node);
 	pfree(out);
 #endif
+}
+
+
+void
+multi_set_rel_pathlist(PlannerInfo *root, RelOptInfo *relOptInfo, Index index,
+					   RangeTblEntry *rte)
+{
+	RelationRestrictionContext *restrictionContext = NULL;
+	RelationRestriction *relationRestriction = NULL;
+	bool distributedTable = false;
+	bool localTable = false;
+
+	if (rte->rtekind != RTE_RELATION)
+	{
+		return;
+	}
+
+	distributedTable = IsDistributedTable(rte->relid);
+	localTable = !distributedTable;
+
+	restrictionContext = (RelationRestrictionContext *) llast(relationRestrictionContextList);
+	relationRestriction = palloc0(sizeof(RelationRestriction));
+
+	relationRestriction->index = index;
+	relationRestriction->relationId = rte->relid;
+	relationRestriction->rte = rte;
+	relationRestriction->relOptInfo = relOptInfo;
+	relationRestriction->distributedRelation = distributedTable;
+	relationRestriction->plannerInfo = root;
+
+	restrictionContext->hasDistributedRelation |= distributedTable;
+	restrictionContext->hasLocalRelation |= localTable;
+
+
+	restrictionContext->relationRestrictionList = lappend(restrictionContext->relationRestrictionList,
+														  relationRestriction);
+
+	ereport(WARNING, (errmsg("Query Id : %d", (int) (root->parse->queryId))));
+
+	ereport(WARNING, (errmsg("%d : %d RTE : %s", index, (int) rte, nodeToString(rte))));
+
+	ereport(WARNING, (errmsg("restrictions : %s", nodeToString(relOptInfo->baserestrictinfo))));
+	ereport(WARNING, (errmsg("join tree : %s", nodeToString(root->parse->jointree))));
+
 }

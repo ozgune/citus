@@ -152,7 +152,7 @@ MultiExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 		}
 	}
 
-	multiPlan = CreatePhysicalPlan(originalQuery, query, params);
+	multiPlan = CreatePhysicalPlan(originalQuery, query, params, NULL);
 
 	INSTR_TIME_SET_CURRENT(planDuration);
 	INSTR_TIME_SUBTRACT(planDuration, planStart);

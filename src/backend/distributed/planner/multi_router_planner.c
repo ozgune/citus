@@ -46,6 +46,7 @@
 #include "nodes/pg_list.h"
 #include "nodes/primnodes.h"
 #include "optimizer/clauses.h"
+#include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
 #include "storage/lock.h"
 #include "utils/elog.h"
@@ -63,16 +64,21 @@ static OnConflictExpr * RebuildOnConflict(Oid relationId,
 										  OnConflictExpr *originalOnConflict);
 #endif
 static ShardInterval * TargetShardInterval(Query *query);
+static List * NewTargetShardInterval(Query *query,
+											  RelationRestrictionContext *restrictionContext);
 static List * QueryRestrictList(Query *query);
 static bool FastShardPruningPossible(CmdType commandType, char partitionMethod);
 static ShardInterval * FastShardPruning(Oid distributedTableId,
 										Const *partionColumnValue);
 static Oid ExtractFirstDistributedTableId(Query *query);
 static Const * ExtractInsertPartitionValue(Query *query, Var *partitionColumn);
-static Task * RouterSelectTask(Query *originalQuery, Query *query);
+static Task * RouterSelectTask(Query *originalQuery, Query *query,
+							   RelationRestrictionContext *restrictionContext);
+static void UpdateJoinTreeAndRelationNames(Query *query,
+										   RelationRestrictionContext *restrictionContext,
+										   List *prunedRelationShardList);
 static Job * RouterQueryJob(Query *query, Task *task);
 static bool MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType);
-static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
 static void SetRangeTablesInherited(Query *query);
 
 
@@ -84,7 +90,9 @@ static void SetRangeTablesInherited(Query *query);
  * returns NULL.
  */
 MultiPlan *
-MultiRouterPlanCreate(Query *originalQuery, Query *query, MultiExecutorType taskExecutorType)
+MultiRouterPlanCreate(Query *originalQuery, Query *query,
+					  MultiExecutorType taskExecutorType,
+					  RelationRestrictionContext *restrictionContext)
 {
 	Task *task = NULL;
 	Job *job = NULL;
@@ -117,8 +125,13 @@ MultiRouterPlanCreate(Query *originalQuery, Query *query, MultiExecutorType task
 	{
 		Assert(commandType == CMD_SELECT);
 
-		task = RouterSelectTask(originalQuery, query);
+		task = RouterSelectTask(originalQuery, query, restrictionContext);
 		jobQuery = originalQuery;
+	}
+
+	if (task == NULL)
+	{
+		return NULL;
 	}
 
 	job = RouterQueryJob(jobQuery, task);
@@ -599,6 +612,73 @@ TargetShardInterval(Query *query)
 	return (ShardInterval *) linitial(prunedShardList);
 }
 
+static List *
+NewTargetShardInterval(Query *query, RelationRestrictionContext *restrictionContext)
+{
+	List *prunedRelationShardList = NIL;
+	int shardCount = 0;
+	Oid distributedTableId = ExtractFirstDistributedTableId(query);
+	DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(distributedTableId);
+	char partitionMethod = cacheEntry->partitionMethod;
+	bool fastShardPruningPossible = false;
+
+	/* error out if no shards exist for the table */
+	shardCount = cacheEntry->shardIntervalArrayLength;
+	if (shardCount == 0)
+	{
+		return NULL;
+	}
+
+	fastShardPruningPossible = FastShardPruningPossible(query->commandType,
+														partitionMethod);
+	if (fastShardPruningPossible)
+	{
+		uint32 rangeTableId = 1;
+		Var *partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
+		Const *partitionValue = ExtractInsertPartitionValue(query, partitionColumn);
+		ShardInterval *shardInterval = FastShardPruning(distributedTableId,
+														partitionValue);
+		List *prunedShardList = NIL;
+
+		if (shardInterval != NULL)
+		{
+			prunedShardList = lappend(prunedShardList, shardInterval);
+		}
+
+		prunedRelationShardList = lappend(prunedRelationShardList, prunedShardList);
+	}
+	else if (restrictionContext != NULL)
+	{
+		ListCell *restrictionCell = NULL;
+		foreach(restrictionCell, restrictionContext->relationRestrictionList)
+		{
+			RelationRestriction *relationResriction = (RelationRestriction *) lfirst(restrictionCell);
+			Index tableId = relationResriction->index;
+			List *baseRestrictionList = relationResriction->relOptInfo->baserestrictinfo;
+			List *restrictClauseList = get_all_actual_clauses(baseRestrictionList);
+			Oid relationId = relationResriction->relationId;
+			List *shardIntervalList = LoadShardIntervalList(relationId);
+			List *prunedShardList = PruneShardList(distributedTableId, tableId,
+												   restrictClauseList,
+												   shardIntervalList);
+
+			prunedRelationShardList = lappend(prunedRelationShardList, prunedShardList);
+		}
+	}
+	else
+	{
+		List *restrictClauseList = QueryRestrictList(query);
+		Index tableId = 1;
+		List *shardIntervalList = LoadShardIntervalList(distributedTableId);
+
+		List *prunedShardList = PruneShardList(distributedTableId, tableId,
+											   restrictClauseList, shardIntervalList);
+
+		prunedRelationShardList = lappend(prunedRelationShardList, prunedShardList);
+	}
+
+	return prunedRelationShardList;
+}
 
 /*
  * UseFastShardPruning returns true if the commandType is INSERT and partition method
@@ -771,57 +851,67 @@ ExtractInsertPartitionValue(Query *query, Var *partitionColumn)
 
 /* RouterSelectTask builds a Task to represent a single shard select query */
 static Task *
-RouterSelectTask(Query *originalQuery, Query *query)
+RouterSelectTask(Query *originalQuery, Query *query,
+				 RelationRestrictionContext *restrictionContext)
 {
 	Task *task = NULL;
-	ShardInterval *shardInterval = TargetShardInterval(query);
+	List * prunedRelationShardList = NewTargetShardInterval(query, restrictionContext);
 	StringInfo queryString = makeStringInfo();
 	uint64 shardId = INVALID_SHARD_ID;
 	bool upsertQuery = false;
 	CmdType commandType PG_USED_FOR_ASSERTS_ONLY = query->commandType;
-	FromExpr *joinTree = NULL;
-	List *rangeTableList = NIL;
-	RangeTblEntry *rangeTableEntry = NULL;
-	Oid relationId = InvalidOid;
-	char *relationName = NULL;
-	Oid schemaId = InvalidOid;
-	char *schemaName = NULL;
+	ListCell *prunedRelationShardListCell = NULL;
 
-	Assert(shardInterval != NULL);
+	ereport(WARNING, (errmsg("Query : %d, original query : %d", (int) (query), (int) originalQuery)));
+	ereport(WARNING, (errmsg("Query Id : %d, original query id : %d", (int) query->queryId, (int) originalQuery->queryId)));
+
+	if (prunedRelationShardList == NULL)
+	{
+		return NULL;
+	}
+
 	Assert(commandType == CMD_SELECT);
 
-	shardId = shardInterval->shardId;
+	foreach(prunedRelationShardListCell, prunedRelationShardList)
+	{
+		List *prunedShardList = (List *) lfirst(prunedRelationShardListCell);
+		ListCell *prunedShardCell = NULL;
+
+		foreach(prunedShardCell, prunedShardList)
+		{
+			ShardInterval *shardInterval = (ShardInterval *) lfirst(prunedShardCell);
+			ereport(WARNING, (errmsg("Shard Id %d of %d", (int) shardInterval->shardId,
+									list_length(prunedShardList))));
+
+			if (shardId == INVALID_SHARD_ID)
+			{
+				shardId = shardInterval->shardId;
+			}
+		}
+	}
+
+	foreach(prunedRelationShardListCell, prunedRelationShardList)
+	{
+		List *prunedShardList = (List *) lfirst(prunedRelationShardListCell);
+
+		if (list_length(prunedShardList) != 1)
+		{
+			return NULL;
+		}
+	}
+
 
 	/*
 	 * Convert the qualifiers to an explicitly and'd clause, which is needed
 	 * before we deparse the query.
 	 */
-	joinTree = query->jointree;
-	if ((joinTree != NULL) && (joinTree->quals != NULL))
-	{
-		Node *whereClause = (Node *) make_ands_explicit((List *) joinTree->quals);
-		joinTree->quals = whereClause;
-	}
 
-	ExtractRangeTableRelationWalker((Node *) query, &rangeTableList);
-	Assert(list_length(rangeTableList) == 1);
+	/* unwrap extra fromexpr introduced by standard planner */
 
-	rangeTableEntry = (RangeTblEntry *) linitial(rangeTableList);
-	relationId = rangeTableEntry->relid;
-	relationName = get_rel_name(relationId);
-	AppendShardIdToName(&relationName, shardId);
+	UpdateJoinTreeAndRelationNames(query, restrictionContext, prunedRelationShardList);
 
-	schemaId = get_rel_namespace(relationId);
-	schemaName = get_namespace_name(schemaId);
-	if (strncmp(schemaName, "public", NAMEDATALEN) == 0)
-	{
-		schemaName = NULL;
-	}
-
-	ModifyRangeTblExtraData(rangeTableEntry, CITUS_RTE_SHARD, schemaName,
-							relationName, NIL);
 	pg_get_query_def(query, queryString);
-	ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
+	ereport(WARNING, (errmsg("distributed statement: %s", queryString->data)));
 
 	task = CitusMakeNode(Task);
 	task->jobId = INVALID_JOB_ID;
@@ -833,6 +923,119 @@ RouterSelectTask(Query *originalQuery, Query *query)
 	task->upsertQuery = upsertQuery;
 
 	return task;
+}
+
+
+static void
+UpdateJoinTreeAndRelationNames(Query* query,
+							   RelationRestrictionContext *restrictionContext,
+							   List* prunedRelationShardList)
+{
+	bool doneUnwrapping = false;
+	uint64 shardId = INVALID_SHARD_ID;
+	Oid relationId = InvalidOid;
+	Oid schemaId = InvalidOid;
+	FromExpr *joinTree = NULL;
+	List *rangeTableIndexList = NIL;
+	ListCell *rangeTableIndexCell = NULL;
+	char *relationName = NULL;
+	char *schemaName = NULL;
+	int relationCount = list_length(restrictionContext->relationRestrictionList);
+
+	/*
+	 * Convert the qualifiers to an explicitly and'd clause, which is needed
+	 * before we deparse the query.
+	 */
+	/* unwrap extra fromexpr introduced by standard planner */
+	joinTree = query->jointree;
+	doneUnwrapping = false;
+	while (joinTree != NULL && !doneUnwrapping)
+	{
+		doneUnwrapping = true;
+		if (list_length(joinTree->fromlist) == 1)
+		{
+			Node *innerExpr = (Node *) linitial(joinTree->fromlist);
+			if (IsA(innerExpr, FromExpr))
+			{
+				joinTree = (FromExpr *) innerExpr;
+				doneUnwrapping = false;
+			}
+		}
+	}
+	query->jointree = joinTree;
+
+	if ((joinTree != NULL) && (joinTree->quals != NULL) && IsA(joinTree->quals, List))
+	{
+		Node *whereClause = (Node *) make_ands_explicit(
+				(List *) joinTree->quals);
+		joinTree->quals = whereClause;
+	}
+	ExtractRangeTableIndexWalker((Node*) query->jointree, &rangeTableIndexList);
+	foreach(rangeTableIndexCell, rangeTableIndexList)
+	{
+		Index index = lfirst_int(rangeTableIndexCell);
+		RangeTblEntry *rte = rt_fetch(index, query->rtable);
+		RTEKind rteKind = rte->rtekind;
+		ListCell *relationRestrictionCell = NULL;
+		RelationRestriction *relationRestriction = NULL;
+		int restrictionOffset = 0;
+		List *shardIntervalList = NIL;
+		ShardInterval *shardInterval = NULL;
+
+
+		if (rteKind == RTE_SUBQUERY)
+		{
+			UpdateJoinTreeAndRelationNames(rte->subquery, restrictionContext, prunedRelationShardList);
+		}
+		else if (rteKind == RTE_RELATION)
+		{
+
+			foreach(relationRestrictionCell, restrictionContext->relationRestrictionList)
+			{
+				relationRestriction = (RelationRestriction *) lfirst(
+						relationRestrictionCell);
+
+				if (relationRestriction->index == index)
+				{
+					break;
+				}
+				restrictionOffset++;
+				relationRestriction = NULL;
+			}
+
+			Assert(relationRestriction != NULL);
+			Assert(restrictionOffset >= 0);
+			Assert(restrictionOffset < relationCount);
+
+			shardIntervalList = (List *) list_nth(prunedRelationShardList,
+					restrictionOffset);
+
+			Assert(list_length(shardIntervalList) == 1);
+			shardInterval = (ShardInterval *) linitial(shardIntervalList);
+
+			shardId = shardInterval->shardId;
+
+			relationId = shardInterval->relationId;
+
+			relationName = get_rel_name(relationId);
+			AppendShardIdToName(&relationName, shardId);
+
+			schemaId = get_rel_namespace(relationId);
+			schemaName = get_namespace_name(schemaId);
+			if (strncmp(schemaName, "public", NAMEDATALEN) == 0)
+			{
+				schemaName = NULL;
+			}
+
+			ModifyRangeTblExtraData(rte, CITUS_RTE_SHARD, schemaName,
+					relationName,
+					NIL);
+		}
+		else
+		{
+			ereport(ERROR, (errmsg("Unexpected RTE Kind %d", (int) rteKind)));
+		}
+	}
 }
 
 
@@ -880,20 +1083,12 @@ RouterQueryJob(Query *query, Task *task)
 bool
 MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 {
-	uint32 rangeTableId = 1;
-	List *rangeTableList = NIL;
-	RangeTblEntry *rangeTableEntry = NULL;
 	Oid distributedTableId = InvalidOid;
-	Var *partitionColumn = NULL;
 	char partitionMethod = '\0';
-	Node *quals = NULL;
 	CmdType commandType PG_USED_FOR_ASSERTS_ONLY = query->commandType;
 	FromExpr *joinTree = query->jointree;
-	List *varClauseList = NIL;
-	ListCell *varClauseCell = NULL;
-	bool partitionColumnMatchExpression = false;
-	int partitionColumnReferenceCount = 0;
-	int shardCount = 0;
+	List *rangeTableIndexList = NIL;
+	ListCell *rangeTableIndexCell = NULL;
 
 	if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
 		commandType == CMD_DELETE)
@@ -907,6 +1102,8 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 	}
 
 	Assert(commandType == CMD_SELECT);
+
+	ereport(WARNING, (errmsg("Join Tree : %s", nodeToString(query->jointree))));
 
 	/*
 	 * Reject subqueries which are in SELECT or WHERE clause.
@@ -928,157 +1125,46 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 	}
 #endif
 
-	/* only hash partitioned tables are supported */
-	distributedTableId = ExtractFirstDistributedTableId(query);
-	partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
-	partitionMethod = PartitionMethod(distributedTableId);
-
-	if (partitionMethod != DISTRIBUTE_BY_HASH)
-	{
-		return false;
-	}
-
 	/* extract range table entries */
-	ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
-
-	/* query can have only one range table of type RTE_RELATION */
-	if (list_length(rangeTableList) != 1)
+	ExtractRangeTableIndexWalker((Node *) query, &rangeTableIndexList);
+	foreach(rangeTableIndexCell, rangeTableIndexList)
 	{
-		return false;
-	}
+		Index index = lfirst_int(rangeTableIndexCell);
+		RangeTblEntry *rte = rt_fetch(index, query->rtable);
 
-	rangeTableEntry = (RangeTblEntry *) linitial(rangeTableList);
-	if (rangeTableEntry->rtekind != RTE_RELATION)
-	{
-		return false;
-	}
+		if (rte->rtekind == RTE_RELATION)
+		{
+			/* only hash partitioned tables are supported */
+			distributedTableId = rte->relid;
+			partitionMethod = PartitionMethod(distributedTableId);
+
+			if (partitionMethod != DISTRIBUTE_BY_HASH)
+			{
+				return false;
+			}
+		}
+		else
+		{
+			ereport(WARNING, (errmsg("unsupported rte kind : %d, %s", (int) rte->rtekind,
+									nodeToString(rte))));
+			return false;
+		}
 
 #if (PG_VERSION_NUM >= 90500)
-	if (rangeTableEntry->tablesample)
-	{
-		return false;
-	}
+		if (rte->tablesample)
+		{
+			return false;
+		}
 #endif
+
+	}
 
 	if (joinTree == NULL)
 	{
 		return false;
 	}
 
-	quals = joinTree->quals;
-	if (quals == NULL)
-	{
-		return false;
-	}
-
-	/* convert list of expressions into expression tree */
-	if (quals != NULL && IsA(quals, List))
-	{
-		quals = (Node *) make_ands_explicit((List *) quals);
-	}
-
-	/*
-	 * Partition column must be used in a simple equality match check and it must be
-	 * place at top level conjustion operator.
-	 */
-	partitionColumnMatchExpression =
-		ColumnMatchExpressionAtTopLevelConjunction(quals, partitionColumn);
-
-	if (!partitionColumnMatchExpression)
-	{
-		return false;
-	}
-
-	/* make sure partition column is used only once in the query */
-	varClauseList = pull_var_clause_default(quals);
-	foreach(varClauseCell, varClauseList)
-	{
-		Var *column = (Var *) lfirst(varClauseCell);
-		if (equal(column, partitionColumn))
-		{
-			partitionColumnReferenceCount++;
-		}
-	}
-
-	if (partitionColumnReferenceCount != 1)
-	{
-		return false;
-	}
-
-	/*
-	 * We need to make sure there is at least one shard for this hash partitioned
-	 * query to be router plannable. We can not prepare a router plan if there
-	 * are no shards.
-	 */
-	shardCount = ShardIntervalCount(distributedTableId);
-	if (shardCount == 0)
-	{
-		return false;
-	}
-
 	return true;
-}
-
-
-/*
- * ColumnMatchExpressionAtTopLevelConjunction returns true if the query contains an exact
- * match (equal) expression on the provided column. The function returns true only
- * if the match expression has an AND relation with the rest of the expression tree.
- */
-static bool
-ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
-{
-	if (node == NULL)
-	{
-		return false;
-	}
-
-	if (IsA(node, OpExpr))
-	{
-		OpExpr *opExpr = (OpExpr *) node;
-		bool simpleExpression = SimpleOpExpression((Expr *) opExpr);
-		bool columnInExpr = false;
-		bool usingEqualityOperator = false;
-
-		if (!simpleExpression)
-		{
-			return false;
-		}
-
-		columnInExpr = OpExpressionContainsColumn(opExpr, column);
-		if (!columnInExpr)
-		{
-			return false;
-		}
-
-		usingEqualityOperator = OperatorImplementsEquality(opExpr->opno);
-
-		return usingEqualityOperator;
-	}
-	else if (IsA(node, BoolExpr))
-	{
-		BoolExpr *boolExpr = (BoolExpr *) node;
-		List *argumentList = boolExpr->args;
-		ListCell *argumentCell = NULL;
-
-		if (boolExpr->boolop != AND_EXPR)
-		{
-			return false;
-		}
-
-		foreach(argumentCell, argumentList)
-		{
-			Node *argumentNode = (Node *) lfirst(argumentCell);
-			bool columnMatch =
-				ColumnMatchExpressionAtTopLevelConjunction(argumentNode, column);
-			if (columnMatch)
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
 }
 
 
