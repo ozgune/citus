@@ -608,22 +608,67 @@ ProcessDropIndexStmt(DropStmt *dropIndexStatement, const char *dropIndexCommand)
 static Node *
 ProcessAlterTableStmt(AlterTableStmt *alterTableStatement, const char *alterTableCommand)
 {
-	/* first check whether a distributed relation is affected */
-	if (alterTableStatement->relation != NULL)
-	{
-		LOCKMODE lockmode = AlterTableGetLockLevel(alterTableStatement->cmds);
-		Oid relationId = AlterTableLookupRelation(alterTableStatement, lockmode);
-		if (OidIsValid(relationId))
-		{
-			bool isDistributedRelation = IsDistributedTable(relationId);
-			if (isDistributedRelation)
-			{
-				ErrorIfUnsupportedAlterTableStmt(alterTableStatement);
+	LOCKMODE lockmode = 0;
+	Oid relationId = InvalidOid;
 
-				/* if it is supported, go ahead and execute the command */
-				ExecuteDistributedDDLCommand(relationId, alterTableCommand);
+	/* first check whether a distributed relation is affected */
+	if (alterTableStatement->relation == NULL)
+	{
+		return (Node *) alterTableStatement;
+	}
+
+	lockmode = AlterTableGetLockLevel(alterTableStatement->cmds);
+	relationId = AlterTableLookupRelation(alterTableStatement, lockmode);
+	if (OidIsValid(relationId) && IsDistributedTable(relationId))
+	{
+		char *schemaName = alterTableStatement->relation->schemaname;
+
+		/* check if this type of ALTER statement is supported */
+		ErrorIfUnsupportedAlterTableStmt(alterTableStatement);
+
+		/*
+		 * We will prefix schema name if it is not included already. At the moment, I
+		 * am not sure if there is a way better than string manipulation.
+		 */
+		if(schemaName == NULL)
+		{
+			Oid schemaOid = get_rel_namespace(relationId);
+			char *relationName = alterTableStatement->relation->relname;
+			char *relationPos = strstr(alterTableCommand, relationName);
+			char previousCharacter = *(relationPos - 1);
+			StringInfo alterTableQueryString = makeStringInfo();
+
+			schemaName = get_namespace_name(schemaOid);
+
+			appendStringInfoString(alterTableQueryString, alterTableCommand);
+
+			/*
+			 * Here we set len value of the alterTableQueryString so that next append
+			 * will start from where we want to inject the schema name. If there is a
+			 * quote character right before the relationPos, that means user quoted
+			 * the relation name. In this case we need to inject schema name to the
+			 * one character previous position. Is there a edge case we miss?
+			 */
+			if(previousCharacter == '"')
+			{
+				alterTableQueryString->len = relationPos - alterTableCommand - 1;
+				appendStringInfo(alterTableQueryString, "%s.%s",
+								 quote_identifier(schemaName), relationPos - 1);
 			}
+			else
+			{
+				alterTableQueryString->len = relationPos - alterTableCommand;
+				appendStringInfo(alterTableQueryString, "%s.%s",
+								 quote_identifier(schemaName), relationPos);
+			}
+
+			ExecuteDistributedDDLCommand(relationId, alterTableQueryString->data);
 		}
+		else
+		{
+			ExecuteDistributedDDLCommand(relationId, alterTableCommand);
+		}
+
 	}
 
 	return (Node *) alterTableStatement;
