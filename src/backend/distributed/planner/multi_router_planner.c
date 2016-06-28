@@ -862,9 +862,6 @@ RouterSelectTask(Query *originalQuery, Query *query,
 	CmdType commandType PG_USED_FOR_ASSERTS_ONLY = query->commandType;
 	ListCell *prunedRelationShardListCell = NULL;
 
-	ereport(WARNING, (errmsg("Query : %d, original query : %d", (int) (query), (int) originalQuery)));
-	ereport(WARNING, (errmsg("Query Id : %d, original query id : %d", (int) query->queryId, (int) originalQuery->queryId)));
-
 	if (prunedRelationShardList == NULL)
 	{
 		return NULL;
