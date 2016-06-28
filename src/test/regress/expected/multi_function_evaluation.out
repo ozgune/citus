@@ -3,26 +3,22 @@
 --
 ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1190000;
 ALTER SEQUENCE pg_catalog.pg_dist_jobid_seq RESTART 1190000;
--- fields with SERIAL work
-CREATE TABLE example (key INT, value SERIAL);
+-- nextval() works (no good way to test DEFAULT, or, by extension, SERIAL)
+CREATE TABLE example (key INT, value INT);
 SELECT master_create_distributed_table('example', 'key', 'hash');
  master_create_distributed_table 
 ---------------------------------
  
 (1 row)
 
-\c - - - :worker_1_port
 CREATE SEQUENCE example_value_seq;
-\c - - - :worker_2_port
-CREATE SEQUENCE example_value_seq;
-\c - - - :master_port
 SELECT master_create_worker_shards('example', 1, 2);
  master_create_worker_shards 
 -----------------------------
  
 (1 row)
 
-INSERT INTO example VALUES (1);
+INSERT INTO example VALUES (1, nextval('example_value_seq'));
 SELECT * FROM example;
  key | value 
 -----+-------
@@ -37,8 +33,8 @@ SELECT * FROM example;
  key | value 
 -----+-------
    1 |     1
-   2 |     2
-   2 |     3
+   2 |      
+   2 |      
 (3 rows)
 
 -- non-immutable functions inside CASE/COALESCE aren't allowed

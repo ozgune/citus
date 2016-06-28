@@ -5,17 +5,13 @@
 ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1190000;
 ALTER SEQUENCE pg_catalog.pg_dist_jobid_seq RESTART 1190000;
 
--- fields with SERIAL work
+-- nextval() works (no good way to test DEFAULT, or, by extension, SERIAL)
 
-CREATE TABLE example (key INT, value SERIAL);
+CREATE TABLE example (key INT, value INT);
 SELECT master_create_distributed_table('example', 'key', 'hash');
-\c - - - :worker_1_port
 CREATE SEQUENCE example_value_seq;
-\c - - - :worker_2_port
-CREATE SEQUENCE example_value_seq;
-\c - - - :master_port
 SELECT master_create_worker_shards('example', 1, 2);
-INSERT INTO example VALUES (1);
+INSERT INTO example VALUES (1, nextval('example_value_seq'));
 SELECT * FROM example;
 
 -- functions called by prepared statements are also evaluated
