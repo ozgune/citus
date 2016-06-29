@@ -74,9 +74,10 @@ static Oid ExtractFirstDistributedTableId(Query *query);
 static Const * ExtractInsertPartitionValue(Query *query, Var *partitionColumn);
 static Task * RouterSelectTask(Query *originalQuery, Query *query,
 							   RelationRestrictionContext *restrictionContext);
+static List * FindWorkersHavingShardPlacements(List* prunedShardIntervalsList);
 static void UpdateJoinTreeAndRelationNames(Query *query,
 										   RelationRestrictionContext *restrictionContext,
-										   List *prunedRelationShardList);
+										   List *prunedShardIntervalsList);
 static Job * RouterQueryJob(Query *query, Task *task);
 static bool MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType);
 static void SetRangeTablesInherited(Query *query);
@@ -861,11 +862,18 @@ RouterSelectTask(Query *originalQuery, Query *query,
 	bool upsertQuery = false;
 	CmdType commandType PG_USED_FOR_ASSERTS_ONLY = query->commandType;
 	ListCell *prunedRelationShardListCell = NULL;
+	List *workerList = NIL;
+	ListCell *workerCell = NULL;
 
 	if (prunedRelationShardList == NULL)
 	{
 		return NULL;
 	}
+
+	ereport(DEBUG2, (errmsg("Query : %s", nodeToString(query))));
+
+	ereport(DEBUG2, (errmsg("Original Query : %s", nodeToString(originalQuery))));
+
 
 	Assert(commandType == CMD_SELECT);
 
@@ -897,13 +905,19 @@ RouterSelectTask(Query *originalQuery, Query *query,
 		}
 	}
 
+	workerList = FindWorkersHavingShardPlacements(prunedRelationShardList);
+	if (workerList == NIL)
+	{
+		ereport(WARNING, (errmsg("Found no placements")));
+		return NULL;
+	}
 
-	/*
-	 * Convert the qualifiers to an explicitly and'd clause, which is needed
-	 * before we deparse the query.
-	 */
+	foreach(workerCell, workerList)
+	{
+		StringInfo nodeInfo = (StringInfo) lfirst(workerCell);
 
-	/* unwrap extra fromexpr introduced by standard planner */
+		ereport(WARNING, (errmsg("Found a placement : %s", nodeInfo->data)));
+	}
 
 	UpdateJoinTreeAndRelationNames(query, restrictionContext, prunedRelationShardList);
 
@@ -923,10 +937,89 @@ RouterSelectTask(Query *originalQuery, Query *query,
 }
 
 
+static List *
+FindWorkersHavingShardPlacements(List* prunedShardIntervalsList)
+{
+	List *shardList = NIL;
+	ListCell *prunedShardIntervalCell = NULL;
+	ListCell *shardCell = NULL;
+	bool firstShard = true;
+	List *workerNodeList = NIL;
+
+	/* construct shard list from all relations' shard intervals */
+	foreach(prunedShardIntervalCell, prunedShardIntervalsList)
+	{
+		List *shardIntervalList = (List *) lfirst(prunedShardIntervalCell);
+		ShardInterval *shardInterval = NULL;
+		uint64 *shardId = (uint64 *) palloc0(sizeof(uint64));
+
+		Assert(list_length(shardIntervalList) == 1);
+		shardInterval = (ShardInterval *) linitial(shardIntervalList);
+		*shardId = shardInterval->shardId;
+
+		shardList = lappend(shardList, shardId);
+	}
+
+	foreach (shardCell, shardList)
+	{
+		uint64 *shardId = (uint64 *) lfirst(shardCell);
+		List *shardPlacementList = FinalizedShardPlacementList(*shardId);
+		ListCell *shardPlacementCell = NULL;
+		List *shardNodeList = NIL;
+
+		foreach(shardPlacementCell, shardPlacementList)
+		{
+			ShardPlacement *shardPlacement = (ShardPlacement *) lfirst(shardPlacementCell);
+			StringInfo nodeInfo = makeStringInfo();
+			appendStringInfo(nodeInfo, "%s:%u", shardPlacement->nodeName,
+							shardPlacement->nodePort);
+			shardNodeList = lappend(shardNodeList, nodeInfo);
+		}
+
+		if (firstShard)
+		{
+			firstShard = false;
+			workerNodeList = shardNodeList;
+		}
+		else
+		{
+			List *oldWorkerNodeList = workerNodeList;
+			ListCell *oldWorkerNodeCell = NULL;
+			ListCell *shardNodeCell = NULL;
+
+			workerNodeList = NIL;
+
+			foreach(oldWorkerNodeCell, oldWorkerNodeList)
+			{
+				StringInfo nodeInfo = (StringInfo) lfirst(oldWorkerNodeCell);
+
+				foreach(shardNodeCell, shardNodeList)
+				{
+					StringInfo shardNodeInfo = (StringInfo) lfirst(shardNodeCell);
+
+					if (strncmp(nodeInfo->data, shardNodeInfo->data, nodeInfo->len) == 0)
+					{
+						workerNodeList = lappend(workerNodeList, nodeInfo);
+					}
+				}
+
+			}
+		}
+
+		/* bail out if workerNodeList becomes empty */
+		if (workerNodeList == NIL)
+		{
+			break;
+		}
+	}
+
+	return workerNodeList;
+}
+
 static void
 UpdateJoinTreeAndRelationNames(Query* query,
 							   RelationRestrictionContext *restrictionContext,
-							   List* prunedRelationShardList)
+							   List* prunedShardIntervalsList)
 {
 	bool doneUnwrapping = false;
 	uint64 shardId = INVALID_SHARD_ID;
@@ -982,7 +1075,7 @@ UpdateJoinTreeAndRelationNames(Query* query,
 
 		if (rteKind == RTE_SUBQUERY)
 		{
-			UpdateJoinTreeAndRelationNames(rte->subquery, restrictionContext, prunedRelationShardList);
+			UpdateJoinTreeAndRelationNames(rte->subquery, restrictionContext, prunedShardIntervalsList);
 		}
 		else if (rteKind == RTE_RELATION)
 		{
@@ -1004,7 +1097,7 @@ UpdateJoinTreeAndRelationNames(Query* query,
 			Assert(restrictionOffset >= 0);
 			Assert(restrictionOffset < relationCount);
 
-			shardIntervalList = (List *) list_nth(prunedRelationShardList,
+			shardIntervalList = (List *) list_nth(prunedShardIntervalsList,
 					restrictionOffset);
 
 			Assert(list_length(shardIntervalList) == 1);
@@ -1109,7 +1202,7 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 	 * Queries which have subqueries, or tablesamples in FROM clauses are rejected later
 	 * during RangeTblEntry checks.
 	 */
-	if (query->hasSubLinks == true || query->cteList != NIL || query->hasForUpdate ||
+	if (query->hasSubLinks == true || query->hasForUpdate ||
 		query->hasRecursive)
 	{
 		return false;
