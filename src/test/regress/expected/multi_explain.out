@@ -335,7 +335,7 @@ Distributed Query
 -- Test single-shard SELECT
 EXPLAIN (COSTS FALSE)
 	SELECT l_quantity FROM lineitem WHERE l_orderkey = 5;
-Distributed Query into pg_merge_job_570009
+Distributed Query
   Executor: Router
   Task Count: 1
   Tasks Shown: All
@@ -355,7 +355,7 @@ t
 EXPLAIN (COSTS FALSE)
 	CREATE TABLE explain_result AS
 	SELECT * FROM lineitem;
-Distributed Query into pg_merge_job_570012
+Distributed Query into pg_merge_job_570009
   Executor: Real-Time
   Task Count: 6
   Tasks Shown: One of 6
@@ -363,12 +363,12 @@ Distributed Query into pg_merge_job_570012
         Node: host=localhost port=57637 dbname=regression
         ->  Seq Scan on lineitem_290000 lineitem
 Master Query
-  ->  Seq Scan on pg_merge_job_570012
+  ->  Seq Scan on pg_merge_job_570009
 -- Test all tasks output
 SET citus.explain_all_tasks TO on;
 EXPLAIN (COSTS FALSE)
 	SELECT avg(l_linenumber) FROM lineitem WHERE l_orderkey > 9030;
-Distributed Query into pg_merge_job_570013
+Distributed Query into pg_merge_job_570010
   Executor: Real-Time
   Task Count: 3
   Tasks Shown: All
@@ -389,7 +389,7 @@ Distributed Query into pg_merge_job_570013
                     Filter: (l_orderkey > 9030)
 Master Query
   ->  Aggregate
-        ->  Seq Scan on pg_merge_job_570013
+        ->  Seq Scan on pg_merge_job_570010
 SELECT true AS valid FROM explain_xml($$
 	SELECT avg(l_linenumber) FROM lineitem WHERE l_orderkey > 9030$$);
 t
@@ -401,7 +401,7 @@ SET citus.task_executor_type TO 'task-tracker';
 SET citus.explain_all_tasks TO off;
 EXPLAIN (COSTS FALSE)
 	SELECT avg(l_linenumber) FROM lineitem WHERE l_orderkey > 9030;
-Distributed Query into pg_merge_job_570016
+Distributed Query into pg_merge_job_570013
   Executor: Task-Tracker
   Task Count: 3
   Tasks Shown: One of 3
@@ -412,7 +412,7 @@ Distributed Query into pg_merge_job_570016
                     Filter: (l_orderkey > 9030)
 Master Query
   ->  Aggregate
-        ->  Seq Scan on pg_merge_job_570016
+        ->  Seq Scan on pg_merge_job_570013
 -- Test re-partition join
 SET citus.large_table_shard_count TO 1;
 EXPLAIN (COSTS FALSE)
@@ -421,7 +421,7 @@ EXPLAIN (COSTS FALSE)
 	WHERE l_orderkey = o_orderkey
 	AND o_custkey = c_custkey
 	AND l_suppkey = s_suppkey;
-Distributed Query into pg_merge_job_570019
+Distributed Query into pg_merge_job_570016
   Executor: Task-Tracker
   Task Count: 1
   Tasks Shown: None, not supported for re-partition queries
@@ -433,7 +433,7 @@ Distributed Query into pg_merge_job_570019
               Merge Task Count: 1
 Master Query
   ->  Aggregate
-        ->  Seq Scan on pg_merge_job_570019
+        ->  Seq Scan on pg_merge_job_570016
 EXPLAIN (COSTS FALSE, FORMAT JSON)
 	SELECT count(*)
 	FROM lineitem, orders, customer, supplier
@@ -468,8 +468,8 @@ EXPLAIN (COSTS FALSE, FORMAT JSON)
             {
               "Node Type": "Seq Scan",
               "Parent Relationship": "Outer",
-              "Relation Name": "pg_merge_job_570022",
-              "Alias": "pg_merge_job_570022"
+              "Relation Name": "pg_merge_job_570019",
+              "Alias": "pg_merge_job_570019"
             }
           ]
         }
@@ -518,8 +518,8 @@ EXPLAIN (COSTS FALSE, FORMAT XML)
             <Plan>
               <Node-Type>Seq Scan</Node-Type>
               <Parent-Relationship>Outer</Parent-Relationship>
-              <Relation-Name>pg_merge_job_570028</Relation-Name>
-              <Alias>pg_merge_job_570028</Alias>
+              <Relation-Name>pg_merge_job_570025</Relation-Name>
+              <Alias>pg_merge_job_570025</Alias>
             </Plan>
           </Plans>
         </Plan>
@@ -557,5 +557,5 @@ EXPLAIN (COSTS FALSE, FORMAT YAML)
         Plans: 
           - Node Type: "Seq Scan"
             Parent Relationship: "Outer"
-            Relation Name: "pg_merge_job_570034"
-            Alias: "pg_merge_job_570034"
+            Relation Name: "pg_merge_job_570031"
+            Alias: "pg_merge_job_570031"

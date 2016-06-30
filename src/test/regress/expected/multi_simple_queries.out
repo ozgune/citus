@@ -101,7 +101,7 @@ INSERT INTO articles_single_shard VALUES (50, 10, 'anjanette', 19519);
 SELECT COUNT(*) FROM articles WHERE author_id = 1 AND author_id = 2;
  count 
 -------
-      
+     0
 (1 row)
 
 -- zero-shard modifications should fail
@@ -177,13 +177,29 @@ SELECT author_id, sum(word_count) AS corpus_size FROM articles
 	GROUP BY author_id
 	HAVING sum(word_count) > 40000
 	ORDER BY sum(word_count) DESC;
-ERROR:  cannot perform distributed planning on this query
-DETAIL:  Having qual is currently unsupported
+ author_id | corpus_size 
+-----------+-------------
+        10 |       59955
+         8 |       55410
+(2 rows)
+
 -- UNION/INTERSECT queries are unsupported
 SELECT * FROM articles WHERE author_id = 10 UNION
 SELECT * FROM articles WHERE author_id = 1; 
-ERROR:  cannot perform distributed planning on this query
-DETAIL:  Union, Intersect, or Except are currently unsupported
+ id | author_id |    title     | word_count 
+----+-----------+--------------+------------
+ 11 |         1 | alamo        |       1347
+ 41 |         1 | aznavour     |      11814
+ 10 |        10 | aggrandize   |      17277
+ 30 |        10 | andelee      |       6363
+  1 |         1 | arsenous     |       9572
+ 21 |         1 | arcading     |       5890
+ 31 |         1 | athwartships |       7271
+ 40 |        10 | attemper     |      14976
+ 20 |        10 | absentness   |       1820
+ 50 |        10 | anjanette    |      19519
+(10 rows)
+
 -- queries using CTEs are unsupported
 WITH long_names AS ( SELECT id FROM authors WHERE char_length(name) > 15 )
 SELECT title FROM articles;
@@ -324,8 +340,8 @@ SET citus.task_executor_type TO 'real-time';
 SELECT *
 	FROM articles
 	WHERE author_id = 1;
-DEBUG:  Creating router plan
 DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  id | author_id |    title     | word_count 
 ----+-----------+--------------+------------
@@ -341,6 +357,7 @@ SELECT *
 	FROM articles
 	WHERE author_id = 1 OR author_id = 17;
 DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  id | author_id |    title     | word_count 
 ----+-----------+--------------+------------
@@ -368,8 +385,8 @@ SELECT *
 SELECT id as article_id, word_count * id as random_value
 	FROM articles
 	WHERE author_id = 1;
-DEBUG:  Creating router plan
 DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  article_id | random_value 
 ------------+--------------
@@ -386,9 +403,9 @@ SELECT a.author_id as first_author, b.word_count as second_word_count
 	FROM articles a, articles b
 	WHERE a.author_id = 10 and a.author_id = b.author_id
 	LIMIT 3;
-DEBUG:  push down of limit count: 3
 DEBUG:  predicate pruning for shardId 850001
-DEBUG:  join prunable for intervals [-2147483648,-1] and [0,2147483647]
+DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  first_author | second_word_count 
 --------------+-------------------
@@ -403,8 +420,9 @@ SELECT a.author_id as first_author, b.word_count as second_word_count
 	FROM articles a, articles_single_shard b
 	WHERE a.author_id = 10 and a.author_id = b.author_id
 	LIMIT 3;
-DEBUG:  push down of limit count: 3
 DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
+DEBUG:  Plan is router executable
  first_author | second_word_count 
 --------------+-------------------
            10 |             19519
@@ -417,8 +435,8 @@ SELECT *
 	FROM articles
 	WHERE author_id = 1
 	LIMIT 2;
-DEBUG:  Creating router plan
 DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  id | author_id |  title   | word_count 
 ----+-----------+----------+------------
@@ -433,8 +451,8 @@ SELECT id
 	FROM articles
 	WHERE author_id = 1
 	GROUP BY id;
-DEBUG:  Creating router plan
 DEBUG:  predicate pruning for shardId 850001
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  id 
 ----
@@ -447,14 +465,15 @@ DEBUG:  Plan is router executable
 
 -- copying from a single shard table does not require the master query
 COPY articles_single_shard TO stdout;
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
 50	10	anjanette	19519
 -- error out for queries with aggregates
 SELECT avg(word_count)
 	FROM articles
 	WHERE author_id = 2;
-DEBUG:  Creating router plan
 DEBUG:  predicate pruning for shardId 850000
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
         avg         
 --------------------
@@ -467,8 +486,8 @@ SELECT max(word_count) as max, min(word_count) as min,
 	   sum(word_count) as sum, count(word_count) as cnt
 	FROM articles
 	WHERE author_id = 2;
-DEBUG:  Creating router plan
 DEBUG:  predicate pruning for shardId 850000
+DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
   max  | min  |  sum  | cnt 
 -------+------+-------+-----
@@ -479,6 +498,7 @@ DEBUG:  Plan is router executable
 SELECT *
 	FROM articles a, articles b
 	WHERE a.id = b.id  AND a.author_id = 1;
+DEBUG:  predicate pruning for shardId 850001
 DEBUG:  predicate pruning for shardId 850001
 DEBUG:  join prunable for task partitionId 0 and 1
 DEBUG:  join prunable for task partitionId 0 and 2

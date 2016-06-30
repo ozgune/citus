@@ -29,7 +29,7 @@
 
 #include "utils/memutils.h"
 
-static List *relationRestrictionContextList = NIL;
+List *relationRestrictionContextList = NIL;
 
 /* local function forward declarations */
 static void CheckNodeIsDumpable(Node *node);

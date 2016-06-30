@@ -108,7 +108,6 @@ MultiRouterPlanCreate(Query *originalQuery, Query *query,
 		return NULL;
 	}
 
-	ereport(DEBUG2, (errmsg("Creating router plan")));
 
 	if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
 		commandType == CMD_DELETE)
@@ -134,6 +133,8 @@ MultiRouterPlanCreate(Query *originalQuery, Query *query,
 	{
 		return NULL;
 	}
+
+	ereport(DEBUG2, (errmsg("Creating router plan")));
 
 	job = RouterQueryJob(jobQuery, task);
 
