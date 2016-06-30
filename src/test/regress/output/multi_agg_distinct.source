@@ -85,7 +85,7 @@ SELECT count(distinct p_mfgr) FROM part;
      5
 (1 row)
 
-SELECT p_mfgr, count(distinct p_partkey) FROM part GROUP BY p_mfgr;
+SELECT p_mfgr, count(distinct p_partkey) FROM part GROUP BY p_mfgr ORDER BY p_mfgr;
           p_mfgr           | count 
 ---------------------------+-------
  Manufacturer#1            |   193

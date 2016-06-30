@@ -1112,11 +1112,19 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 SELECT author_articles_max_id();
-DEBUG:  Creating router plan
+DEBUG:  predicate pruning for shardId 840001
 CONTEXT:  SQL statement "SELECT MAX(id) FROM articles_hash ah
 		WHERE author_id = 1"
 PL/pgSQL function author_articles_max_id() line 5 at SQL statement
 DEBUG:  predicate pruning for shardId 840001
+CONTEXT:  SQL statement "SELECT MAX(id) FROM articles_hash ah
+		WHERE author_id = 1"
+PL/pgSQL function author_articles_max_id() line 5 at SQL statement
+DEBUG:  predicate pruning for shardId 840001
+CONTEXT:  SQL statement "SELECT MAX(id) FROM articles_hash ah
+		WHERE author_id = 1"
+PL/pgSQL function author_articles_max_id() line 5 at SQL statement
+DEBUG:  Creating router plan
 CONTEXT:  SQL statement "SELECT MAX(id) FROM articles_hash ah
 		WHERE author_id = 1"
 PL/pgSQL function author_articles_max_id() line 5 at SQL statement
