@@ -863,17 +863,11 @@ RouterSelectTask(Query *originalQuery, Query *query,
 	CmdType commandType = query->commandType;
 	ListCell *prunedRelationShardListCell = NULL;
 	List *workerList = NIL;
-	ListCell *workerCell = NULL;
 
 	if (prunedRelationShardList == NULL)
 	{
 		return NULL;
 	}
-
-	ereport(DEBUG2, (errmsg("Query : %s", nodeToString(query))));
-
-	ereport(DEBUG2, (errmsg("Original Query : %s", nodeToString(originalQuery))));
-
 
 	Assert(commandType == CMD_SELECT);
 
@@ -885,8 +879,6 @@ RouterSelectTask(Query *originalQuery, Query *query,
 		foreach(prunedShardCell, prunedShardList)
 		{
 			ShardInterval *shardInterval = (ShardInterval *) lfirst(prunedShardCell);
-			ereport(WARNING, (errmsg("Shard Id %d of %d", (int) shardInterval->shardId,
-									list_length(prunedShardList))));
 
 			if (shardId == INVALID_SHARD_ID)
 			{
@@ -912,17 +904,10 @@ RouterSelectTask(Query *originalQuery, Query *query,
 		return NULL;
 	}
 
-	foreach(workerCell, workerList)
-	{
-		StringInfo nodeInfo = (StringInfo) lfirst(workerCell);
-
-		ereport(WARNING, (errmsg("Found a placement : %s", nodeInfo->data)));
-	}
 
 	UpdateJoinTreeAndRelationNames(query, restrictionContext, prunedRelationShardList);
 
 	pg_get_query_def(query, queryString);
-	ereport(WARNING, (errmsg("distributed statement: %s", queryString->data)));
 
 	task = CitusMakeNode(Task);
 	task->jobId = INVALID_JOB_ID;
@@ -1192,8 +1177,6 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 	}
 
 	Assert(commandType == CMD_SELECT);
-
-	ereport(WARNING, (errmsg("Join Tree : %s", nodeToString(query->jointree))));
 
 	/*
 	 * Reject subqueries which are in SELECT or WHERE clause.

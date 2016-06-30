@@ -342,12 +342,4 @@ multi_set_rel_pathlist(PlannerInfo *root, RelOptInfo *relOptInfo, Index index,
 
 	restrictionContext->relationRestrictionList = lappend(restrictionContext->relationRestrictionList,
 														  relationRestriction);
-
-	ereport(WARNING, (errmsg("Query Id : %d", (int) (root->parse->queryId))));
-
-	ereport(WARNING, (errmsg("%u : %p RTE : %s", index, rte, nodeToString(rte))));
-
-	ereport(WARNING, (errmsg("restrictions : %s", nodeToString(relOptInfo->baserestrictinfo))));
-	ereport(WARNING, (errmsg("join tree : %s", nodeToString(root->parse->jointree))));
-
 }
