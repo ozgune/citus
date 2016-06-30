@@ -75,7 +75,7 @@ static Const * ExtractInsertPartitionValue(Query *query, Var *partitionColumn);
 static Task * RouterSelectTask(Query *originalQuery, Query *query,
 							   RelationRestrictionContext *restrictionContext);
 static List * FindWorkersHavingShardPlacements(List* prunedShardIntervalsList);
-static void UpdateJoinTreeAndRelationNames(Query *query,
+static void UpdateJoinTreeAndRelationNames(Query *originalQuery, Query *query,
 										   RelationRestrictionContext *restrictionContext,
 										   List *prunedShardIntervalsList);
 static Job * RouterQueryJob(Query *query, Task *task);
@@ -904,10 +904,10 @@ RouterSelectTask(Query *originalQuery, Query *query,
 		return NULL;
 	}
 
+	UpdateJoinTreeAndRelationNames(originalQuery, query, restrictionContext,
+								   prunedRelationShardList);
 
-	UpdateJoinTreeAndRelationNames(query, restrictionContext, prunedRelationShardList);
-
-	pg_get_query_def(query, queryString);
+	pg_get_query_def(originalQuery, queryString);
 
 	task = CitusMakeNode(Task);
 	task->jobId = INVALID_JOB_ID;
@@ -1001,116 +1001,122 @@ FindWorkersHavingShardPlacements(List* prunedShardIntervalsList)
 	return workerNodeList;
 }
 
-static void
-UpdateJoinTreeAndRelationNames(Query* query,
-							   RelationRestrictionContext *restrictionContext,
-							   List* prunedShardIntervalsList)
+
+typedef struct UpdateRelnameContext
 {
-	bool doneUnwrapping = false;
+	RelationRestrictionContext *restrictionContext;
+	List* prunedRelationShardList;
+} UpdateRelnameContext;
+
+
+static bool
+UpdateRelname(Node *node, UpdateRelnameContext *context)
+{
+	RelationRestrictionContext *restrictionContext = context->restrictionContext;
+	List* prunedRelationShardList = context->prunedRelationShardList;
+	int relationCount = list_length(restrictionContext->relationRestrictionList);
+	RangeTblEntry *newRte = NULL;
 	uint64 shardId = INVALID_SHARD_ID;
 	Oid relationId = InvalidOid;
 	Oid schemaId = InvalidOid;
-	FromExpr *joinTree = NULL;
-	List *rangeTableIndexList = NIL;
-	ListCell *rangeTableIndexCell = NULL;
 	char *relationName = NULL;
 	char *schemaName = NULL;
-	int relationCount = list_length(restrictionContext->relationRestrictionList);
+	ListCell *relationRestrictionCell = NULL;
+	int restrictionOffset = 0;
+	RelationRestriction *relationRestriction = NULL;
+	List *shardIntervalList = NIL;
+	ShardInterval *shardInterval = NULL;
+
+	if (node == NULL)
+	{
+		return false;
+	}
+
+	/* want to look at all RTEs, even in subqueries, CTEs and such */
+	if (IsA(node, Query))
+	{
+		return query_tree_walker((Query *) node, UpdateRelname, context, QTW_EXAMINE_RTES);
+	}
+
+	if (!IsA(node, RangeTblEntry))
+	{
+		return expression_tree_walker(node, UpdateRelname, context);
+	}
+
+
+	newRte = (RangeTblEntry *) node;
+
+	if (newRte->rtekind != RTE_RELATION)
+	{
+		return false;
+	}
 
 	/*
-	 * Convert the qualifiers to an explicitly and'd clause, which is needed
-	 * before we deparse the query.
+	 * Search for the restrictions associated with the RTE. There better be
+	 * some, otherwise this query wouldn't be elegible as a router query.
+	 *
+	 * FIXME: We should probably use a hashtable here, to do efficient
+	 * lookup.
 	 */
-	/* unwrap extra fromexpr introduced by standard planner */
-	joinTree = query->jointree;
-	doneUnwrapping = false;
-	while (joinTree != NULL && !doneUnwrapping)
+	foreach(relationRestrictionCell, restrictionContext->relationRestrictionList)
 	{
-		doneUnwrapping = true;
-		if (list_length(joinTree->fromlist) == 1)
-		{
-			Node *innerExpr = (Node *) linitial(joinTree->fromlist);
-			if (IsA(innerExpr, FromExpr))
-			{
-				joinTree = (FromExpr *) innerExpr;
-				doneUnwrapping = false;
-			}
-		}
-	}
-	query->jointree = joinTree;
+		relationRestriction =
+			(RelationRestriction *) lfirst(relationRestrictionCell);
 
-	if ((joinTree != NULL) && (joinTree->quals != NULL) && IsA(joinTree->quals, List))
+		if (GetRTEIdentity(relationRestriction->rte) == GetRTEIdentity(newRte))
+		{
+			break;
+		}
+
+		relationRestriction = NULL;
+		restrictionOffset++;
+	}
+
+	if (relationRestriction == NULL)
 	{
-		Node *whereClause = (Node *) make_ands_explicit(
-				(List *) joinTree->quals);
-		joinTree->quals = whereClause;
+		elog(WARNING, "no match");
+		return false;
 	}
-	ExtractRangeTableIndexWalker((Node*) query->jointree, &rangeTableIndexList);
-	foreach(rangeTableIndexCell, rangeTableIndexList)
+
+	Assert(restrictionOffset >= 0);
+	Assert(restrictionOffset < relationCount);
+
+	/* FIXME: O(n), store in releationRestriction instead */
+	shardIntervalList = (List *) list_nth(prunedRelationShardList,
+										  restrictionOffset);
+
+	Assert(list_length(shardIntervalList) == 1);
+	shardInterval = (ShardInterval *) linitial(shardIntervalList);
+
+	shardId = shardInterval->shardId;
+	relationId = shardInterval->relationId;
+	relationName = get_rel_name(relationId);
+	AppendShardIdToName(&relationName, shardId);
+
+	schemaId = get_rel_namespace(relationId);
+	schemaName = get_namespace_name(schemaId);
+
+	/* XXX: why is that a good idea? */
+	if (strncmp(schemaName, "public", NAMEDATALEN) == 0)
 	{
-		Index index = lfirst_int(rangeTableIndexCell);
-		RangeTblEntry *rte = rt_fetch(index, query->rtable);
-		RTEKind rteKind = rte->rtekind;
-		ListCell *relationRestrictionCell = NULL;
-		RelationRestriction *relationRestriction = NULL;
-		int restrictionOffset = 0;
-		List *shardIntervalList = NIL;
-		ShardInterval *shardInterval = NULL;
-
-
-		if (rteKind == RTE_SUBQUERY)
-		{
-			UpdateJoinTreeAndRelationNames(rte->subquery, restrictionContext, prunedShardIntervalsList);
-		}
-		else if (rteKind == RTE_RELATION)
-		{
-
-			foreach(relationRestrictionCell, restrictionContext->relationRestrictionList)
-			{
-				relationRestriction = (RelationRestriction *) lfirst(
-						relationRestrictionCell);
-
-				if (relationRestriction->index == index)
-				{
-					break;
-				}
-				restrictionOffset++;
-				relationRestriction = NULL;
-			}
-
-			Assert(relationRestriction != NULL);
-			Assert(restrictionOffset >= 0);
-			Assert(restrictionOffset < relationCount);
-
-			shardIntervalList = (List *) list_nth(prunedShardIntervalsList,
-					restrictionOffset);
-
-			Assert(list_length(shardIntervalList) == 1);
-			shardInterval = (ShardInterval *) linitial(shardIntervalList);
-
-			shardId = shardInterval->shardId;
-
-			relationId = shardInterval->relationId;
-
-			relationName = get_rel_name(relationId);
-			AppendShardIdToName(&relationName, shardId);
-
-			schemaId = get_rel_namespace(relationId);
-			schemaName = get_namespace_name(schemaId);
-			if (strncmp(schemaName, "public", NAMEDATALEN) == 0)
-			{
-				schemaName = NULL;
-			}
-
-			ModifyRangeTblExtraData(rte, CITUS_RTE_SHARD, schemaName,
-					relationName,
-					NIL);
-		}
-		else
-		{
-			ereport(ERROR, (errmsg("Unexpected RTE Kind %d", (int) rteKind)));
-		}
+		schemaName = NULL;
 	}
+
+	ModifyRangeTblExtraData(newRte, CITUS_RTE_SHARD, schemaName,
+							relationName,
+							NIL);
+
+	return false;
+}
+
+static void
+UpdateJoinTreeAndRelationNames(Query *originalQuery, Query *query,
+							   RelationRestrictionContext *restrictionContext,
+							   List* prunedRelationShardList)
+{
+	UpdateRelnameContext context = {restrictionContext, prunedRelationShardList};
+
+	query_tree_walker(originalQuery, UpdateRelname, &context, QTW_EXAMINE_RTES);
 }
 
 
@@ -1171,6 +1177,7 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 		return true;
 	}
 
+	/* FIXME: I tend to think it's time to remove this */
 	if (taskExecutorType != MULTI_EXECUTOR_REAL_TIME)
 	{
 		return false;
@@ -1179,24 +1186,13 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 	Assert(commandType == CMD_SELECT);
 
 	/*
-	 * Reject subqueries which are in SELECT or WHERE clause.
-	 * Queries which are recursive, with CommonTableExpr, with locking (hasForUpdate),
-	 * or with window functions are also rejected here.
-	 * Queries which have subqueries, or tablesamples in FROM clauses are rejected later
-	 * during RangeTblEntry checks.
+	 * FIXME, figure out which restrictions we exactly want. FOR UPDATE seems
+	 * to make no sense, given the transactional behaviour.
 	 */
-	if (query->hasSubLinks == true || query->hasForUpdate ||
-		query->hasRecursive)
+	if (query->hasForUpdate)
 	{
 		return false;
 	}
-
-#if (PG_VERSION_NUM >= 90500)
-	if (query->groupingSets)
-	{
-		return false;
-	}
-#endif
 
 	/* extract range table entries */
 	ExtractRangeTableIndexWalker((Node *) query, &rangeTableIndexList);
@@ -1216,19 +1212,6 @@ MultiRouterPlannableQuery(Query *query, MultiExecutorType taskExecutorType)
 				return false;
 			}
 		}
-		else
-		{
-			ereport(WARNING, (errmsg("unsupported rte kind : %d, %s", (int) rte->rtekind,
-									nodeToString(rte))));
-			return false;
-		}
-
-#if (PG_VERSION_NUM >= 90500)
-		if (rte->tablesample)
-		{
-			return false;
-		}
-#endif
 
 	}
 
