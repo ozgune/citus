@@ -44,13 +44,24 @@ PlannedStmt *
 multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 {
 	PlannedStmt *result = NULL;
-	Query *originalQuery = copyObject(parse);
+	bool needsDistributed = NeedsDistributedPlanning(parse);
+	Query *originalQuery = NULL;
+	RelationRestrictionContext *restrictionContext = NULL;
+
+	/*
+	 * standard_planner scribbles on it's input, but for deparsing we need the
+	 * unmodified form. So copy once we're sure it's a distributed query.
+	 */
+	if (needsDistributed)
+	{
+		originalQuery = copyObject(parse);
+	}
+
+	restrictionContext = palloc0(sizeof(RelationRestrictionContext));
+	relationRestrictionContextList = lappend(relationRestrictionContextList, restrictionContext);
 
 	PG_TRY();
 	{
-		RelationRestrictionContext *restrictionContext = palloc0(sizeof(RelationRestrictionContext));
-		relationRestrictionContextList = lappend(relationRestrictionContextList, restrictionContext);
-
 		/*
 		 * First call into standard planner. This is required because the Citus
 		 * planner relies on parse tree transformations made by postgres' planner.
@@ -58,28 +69,27 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 
 		result = standard_planner(parse, cursorOptions, boundParams);
 
-		if (NeedsDistributedPlanning(parse))
+		if (needsDistributed)
 		{
 			MultiPlan *physicalPlan = CreatePhysicalPlan(originalQuery, parse, boundParams, restrictionContext);
 
 			/* store required data into the planned statement */
 			result = MultiQueryContainerNode(result, physicalPlan);
 		}
-
-
-		relationRestrictionContextList = list_delete_ptr(relationRestrictionContextList,
-														 restrictionContext);
 	}
 	PG_CATCH();
 	{
 		RelationRestrictionContext *restrictionContext =
-				(RelationRestrictionContext *) llast(relationRestrictionContextList);
+			(RelationRestrictionContext *) llast(relationRestrictionContextList);
 		relationRestrictionContextList = list_delete_ptr(relationRestrictionContextList,
-				 	 	 	 	 	 	 	 	 	 	 restrictionContext);
-		ereport(WARNING, (errmsg("in catch block")));
+														 restrictionContext);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	relationRestrictionContextList = list_delete_ptr(relationRestrictionContextList,
+													 restrictionContext);
+
 	return result;
 }
 
@@ -94,7 +104,7 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 MultiPlan *
 CreatePhysicalPlan(Query *originalQuery, Query *query, ParamListInfo boundParams, RelationRestrictionContext *restrictionContext)
 {
-	Query *queryCopy = copyObject(query);
+	Query *queryCopy = copyObject(query); /* FIXME: why are we copying here? */
 	MultiPlan *physicalPlan = MultiRouterPlanCreate(originalQuery, queryCopy, TaskExecutorType, restrictionContext);
 	if (physicalPlan == NULL)
 	{
