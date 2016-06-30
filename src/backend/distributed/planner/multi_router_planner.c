@@ -618,64 +618,36 @@ static List *
 NewTargetShardInterval(Query *query, RelationRestrictionContext *restrictionContext)
 {
 	List *prunedRelationShardList = NIL;
-	int shardCount = 0;
-	Oid distributedTableId = ExtractFirstDistributedTableId(query);
-	DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(distributedTableId);
-	char partitionMethod = cacheEntry->partitionMethod;
-	bool fastShardPruningPossible = false;
+	ListCell *restrictionCell = NULL;
 
-	/* error out if no shards exist for the table */
-	shardCount = cacheEntry->shardIntervalArrayLength;
-	if (shardCount == 0)
-	{
-		return NULL;
-	}
+	Assert(query->commandType == CMD_SELECT);
+	Assert(restrictionContext != NULL);
 
-	fastShardPruningPossible = FastShardPruningPossible(query->commandType,
-														partitionMethod);
-	if (fastShardPruningPossible)
+	foreach(restrictionCell, restrictionContext->relationRestrictionList)
 	{
-		uint32 rangeTableId = 1;
-		Var *partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
-		Const *partitionValue = ExtractInsertPartitionValue(query, partitionColumn);
-		ShardInterval *shardInterval = FastShardPruning(distributedTableId,
-														partitionValue);
+		RelationRestriction *relationResriction = (RelationRestriction *) lfirst(restrictionCell);
+		Oid relationId = relationResriction->relationId;
+		Index tableId = relationResriction->index;
+		DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(relationId);
+		int shardCount = cacheEntry->shardIntervalArrayLength;
+		List *baseRestrictionList = relationResriction->relOptInfo->baserestrictinfo;
+		List *restrictClauseList = get_all_actual_clauses(baseRestrictionList);
+		List * shardIntervalList = NIL;
 		List *prunedShardList = NIL;
+		relationResriction->prunedShardList = NIL;
 
-		if (shardInterval != NULL)
+		/* error out if no shards exist for any of the tables */
+		if (shardCount == 0)
 		{
-			prunedShardList = lappend(prunedShardList, shardInterval);
+			return NULL;
 		}
 
-		prunedRelationShardList = lappend(prunedRelationShardList, prunedShardList);
-	}
-	else if (restrictionContext != NULL)
-	{
-		ListCell *restrictionCell = NULL;
-		foreach(restrictionCell, restrictionContext->relationRestrictionList)
-		{
-			RelationRestriction *relationResriction = (RelationRestriction *) lfirst(restrictionCell);
-			Index tableId = relationResriction->index;
-			List *baseRestrictionList = relationResriction->relOptInfo->baserestrictinfo;
-			List *restrictClauseList = get_all_actual_clauses(baseRestrictionList);
-			Oid relationId = relationResriction->relationId;
-			List *shardIntervalList = LoadShardIntervalList(relationId);
-			List *prunedShardList = PruneShardList(distributedTableId, tableId,
-												   restrictClauseList,
-												   shardIntervalList);
+		shardIntervalList = LoadShardIntervalList(relationId);
+		prunedShardList = PruneShardList(relationId, tableId,
+										 restrictClauseList,
+										 shardIntervalList);
 
-			prunedRelationShardList = lappend(prunedRelationShardList, prunedShardList);
-		}
-	}
-	else
-	{
-		List *restrictClauseList = QueryRestrictList(query);
-		Index tableId = 1;
-		List *shardIntervalList = LoadShardIntervalList(distributedTableId);
-
-		List *prunedShardList = PruneShardList(distributedTableId, tableId,
-											   restrictClauseList, shardIntervalList);
-
+		relationResriction->prunedShardList = prunedShardList;
 		prunedRelationShardList = lappend(prunedRelationShardList, prunedShardList);
 	}
 
@@ -875,26 +847,16 @@ RouterSelectTask(Query *originalQuery, Query *query,
 	foreach(prunedRelationShardListCell, prunedRelationShardList)
 	{
 		List *prunedShardList = (List *) lfirst(prunedRelationShardListCell);
-		ListCell *prunedShardCell = NULL;
-
-		foreach(prunedShardCell, prunedShardList)
-		{
-			ShardInterval *shardInterval = (ShardInterval *) lfirst(prunedShardCell);
-
-			if (shardId == INVALID_SHARD_ID)
-			{
-				shardId = shardInterval->shardId;
-			}
-		}
-	}
-
-	foreach(prunedRelationShardListCell, prunedRelationShardList)
-	{
-		List *prunedShardList = (List *) lfirst(prunedRelationShardListCell);
-
+		ShardInterval *shardInterval = NULL;
 		if (list_length(prunedShardList) != 1)
 		{
 			return NULL;
+		}
+
+		if (shardId == INVALID_SHARD_ID)
+		{
+			shardInterval = (ShardInterval *) linitial(prunedShardList);
+			shardId = shardInterval->shardId;
 		}
 	}
 
@@ -1014,8 +976,6 @@ static bool
 UpdateRelname(Node *node, UpdateRelnameContext *context)
 {
 	RelationRestrictionContext *restrictionContext = context->restrictionContext;
-	List* prunedRelationShardList = context->prunedRelationShardList;
-	int relationCount = list_length(restrictionContext->relationRestrictionList);
 	RangeTblEntry *newRte = NULL;
 	uint64 shardId = INVALID_SHARD_ID;
 	Oid relationId = InvalidOid;
@@ -1023,7 +983,6 @@ UpdateRelname(Node *node, UpdateRelnameContext *context)
 	char *relationName = NULL;
 	char *schemaName = NULL;
 	ListCell *relationRestrictionCell = NULL;
-	int restrictionOffset = 0;
 	RelationRestriction *relationRestriction = NULL;
 	List *shardIntervalList = NIL;
 	ShardInterval *shardInterval = NULL;
@@ -1070,7 +1029,6 @@ UpdateRelname(Node *node, UpdateRelnameContext *context)
 		}
 
 		relationRestriction = NULL;
-		restrictionOffset++;
 	}
 
 	if (relationRestriction == NULL)
@@ -1079,12 +1037,9 @@ UpdateRelname(Node *node, UpdateRelnameContext *context)
 		return false;
 	}
 
-	Assert(restrictionOffset >= 0);
-	Assert(restrictionOffset < relationCount);
+	Assert(relationRestriction != NULL);
 
-	/* FIXME: O(n), store in releationRestriction instead */
-	shardIntervalList = (List *) list_nth(prunedRelationShardList,
-										  restrictionOffset);
+	shardIntervalList = relationRestriction->prunedShardList;
 
 	Assert(list_length(shardIntervalList) == 1);
 	shardInterval = (ShardInterval *) linitial(shardIntervalList);

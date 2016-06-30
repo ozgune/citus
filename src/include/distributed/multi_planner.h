@@ -29,6 +29,7 @@ typedef struct RelationRestriction
 	RangeTblEntry *rte;
 	RelOptInfo *relOptInfo;
 	PlannerInfo *plannerInfo;
+	List *prunedShardList;
 } RelationRestriction;
 
 

@@ -335,6 +335,7 @@ multi_set_rel_pathlist(PlannerInfo *root, RelOptInfo *relOptInfo, Index index,
 	relationRestriction->relOptInfo = relOptInfo;
 	relationRestriction->distributedRelation = distributedTable;
 	relationRestriction->plannerInfo = root;
+	relationRestriction->prunedShardList = NIL;
 
 	restrictionContext->hasDistributedRelation |= distributedTable;
 	restrictionContext->hasLocalRelation |= localTable;
