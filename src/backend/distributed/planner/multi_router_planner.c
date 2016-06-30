@@ -860,7 +860,7 @@ RouterSelectTask(Query *originalQuery, Query *query,
 	StringInfo queryString = makeStringInfo();
 	uint64 shardId = INVALID_SHARD_ID;
 	bool upsertQuery = false;
-	CmdType commandType PG_USED_FOR_ASSERTS_ONLY = query->commandType;
+	CmdType commandType = query->commandType;
 	ListCell *prunedRelationShardListCell = NULL;
 	List *workerList = NIL;
 	ListCell *workerCell = NULL;
