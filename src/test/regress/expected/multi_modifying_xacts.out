@@ -64,10 +64,8 @@ INSERT INTO researchers VALUES (7, 4, 'Jim Gray');
 SAVEPOINT hire_engelbart;
 INSERT INTO researchers VALUES (8, 4, 'Douglas Engelbart');
 ROLLBACK TO hire_engelbart;
-WARNING:  AbortSubTransaction while in ABORT state
-ERROR:  cannot ROLLBACK in transactions which modify distributed tables
 COMMIT;
-WARNING:  there is no transaction in progress
+ERROR:  cannot ROLLBACK TO SAVEPOINT in transactions which modify distributed tables
 SELECT name FROM researchers WHERE lab_id = 4;
  name 
 ------

@@ -31,5 +31,6 @@ extern bool ExecuteTaskAndStoreResults(Task *task, TupleDesc tupleDescriptor,
 									   Tuplestorestate *tupleStore);
 extern void RouterExecutorFinish(QueryDesc *queryDesc);
 extern void RouterExecutorEnd(QueryDesc *queryDesc);
+extern void InstallRouterExecutorShmemHook(void);
 
 #endif /* MULTI_ROUTER_EXECUTOR_H_ */
